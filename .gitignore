@@ -1,0 +1,7 @@
+bin/
+obj/
+# RocksDB database directories (default name and common variants)
+crackdb/
+*.rdb/
+*.db/
+dist/
