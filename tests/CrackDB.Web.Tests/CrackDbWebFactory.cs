@@ -2,10 +2,12 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using CrackDB;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CrackDB.Web.Tests;
 
@@ -24,12 +26,18 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
 
     public string Root { get; }
     private readonly int _loginLimit;
+    private readonly Dictionary<string, string?> _extra;
+    private readonly string? _remoteIp;
 
     public CrackDbWebFactory() : this(1000) { }
 
-    internal CrackDbWebFactory(int loginLimit)
+    /// <param name="extraConfig">Extra configuration keys (e.g. ForwardedProxies).</param>
+    /// <param name="remoteIp">If set, every request appears to come from this peer address (TestServer has none).</param>
+    internal CrackDbWebFactory(int loginLimit, Dictionary<string, string?>? extraConfig = null, string? remoteIp = null)
     {
         _loginLimit = loginLimit;
+        _extra = extraConfig ?? new();
+        _remoteIp = remoteIp;
         Root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
         EnsureThrowaway(Root);
         Directory.CreateDirectory(Root);
@@ -62,7 +70,21 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
             ["Auth:PasswordHash"] = new PasswordHasher<string>().HashPassword(Username, Password),
             ["Auth:ApiKeyHash"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(ApiKey))),
             ["Auth:LoginAttemptsPerMinute"] = _loginLimit.ToString(),
-        }));
+        }.Concat(_extra)));
+        if (_remoteIp is not null)
+        {
+            var ip = IPAddress.Parse(_remoteIp);
+            builder.ConfigureServices(s => s.AddTransient<IStartupFilter>(_ => new RemoteIpFilter(ip)));
+        }
+    }
+
+    private sealed class RemoteIpFilter(IPAddress ip) : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use((ctx, n) => { ctx.Connection.RemoteIpAddress = ip; return n(ctx); });
+            next(app);
+        };
     }
 
     /// <summary>https base address so the Secure session cookie round-trips.</summary>

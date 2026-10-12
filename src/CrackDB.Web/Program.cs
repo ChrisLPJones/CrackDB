@@ -107,16 +107,9 @@ services.AddRateLimiter(o =>
     };
 });
 
-// Only a loopback proxy (Caddy) may supply X-Forwarded-*.
-services.Configure<ForwardedHeadersOptions>(o =>
-{
-    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    o.KnownProxies.Clear();
-    o.KnownNetworks.Clear();
-    o.KnownProxies.Add(IPAddress.Loopback);
-    o.KnownProxies.Add(IPAddress.IPv6Loopback);
-    o.ForwardLimit = 1;
-});
+// Only loopback plus explicitly configured proxies/networks (CRACKDB_ForwardedProxies /
+// CRACKDB_ForwardedNetworks) may supply X-Forwarded-*. Malformed values abort startup.
+services.Configure<ForwardedHeadersOptions>(o => ForwardedOptions.Apply(o, builder.Configuration));
 
 services.AddProblemDetails();
 services.AddExceptionHandler<ApiExceptionHandler>();
