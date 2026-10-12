@@ -32,3 +32,15 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 table { border-collapse: collapse; margin-top: 8px; }
 td, th { padding: 2px 12px 2px 0; text-align: left; }
 .login { max-width: 360px; margin: 10vh auto; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0 0; }
+.hint { color: var(--muted); font-size: .9rem; margin: 0 0 8px; }
+input[type=file] { width: 100%; }
+.job { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.jobhead { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.badge { border: 1px solid var(--border); border-radius: 999px; padding: 0 10px; font-size: .85rem; color: var(--muted); }
+.badge.running { color: var(--accent); border-color: var(--accent); }
+.badge.failed { color: var(--danger); border-color: var(--danger); }
+progress { width: 100%; height: 12px; margin-top: 8px; accent-color: var(--accent); }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 8px 0 0; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }

@@ -11,9 +11,13 @@ public interface IDbManager
 {
     IReadOnlyList<string> ListDatabases();
     DbLease AcquireRead(string name);
-    /// <summary>P3 seam: exclusive write window. Readers are drained and parked while it runs.</summary>
+    /// <summary>
+    /// Exclusive write window. Readers are drained first; while the window runs, reads of this db
+    /// fail fast with <see cref="DbBusyException"/> (409) instead of hanging for the whole import.
+    /// <paramref name="allowCreate"/> lets an import materialise a brand-new db; compact leaves it off.
+    /// </summary>
     Task<T> WithWriteAsync<T>(string name, DbOpenMode mode,
-        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct);
+        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct, bool allowCreate = false);
 }
 
 /// <summary>
@@ -52,7 +56,8 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         public WordlistDatabase? Handle;
         public DbOpenMode Mode;
         public int Readers;
-        public bool Swapping;                          // a write window owns the handle; readers park
+        public bool Swapping;                          // a write window is claiming/releasing the handle; readers park briefly
+        public bool Writing;                           // the write work is running; readers fail fast (409)
     }
 
     private static readonly Encoding Utf8 = new UTF8Encoding(false);
@@ -70,7 +75,9 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         var entry = _entries.GetOrAdd(name, _ => new DbEntry());
         lock (entry.Gate)
         {
-            while (entry.Swapping && !_closed) Monitor.Wait(entry.Gate);   // brief, sync park (P3 write window)
+            if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
+            while (entry.Swapping && !_closed) Monitor.Wait(entry.Gate);   // brief, sync park (drain / reopen)
+            if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
             if (_closed) throw new ObjectDisposedException(nameof(DbManager));
             entry.Handle ??= Open(path, DbOpenMode.Read, entry);
             entry.Readers++;
@@ -79,9 +86,11 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     }
 
     public async Task<T> WithWriteAsync<T>(string name, DbOpenMode mode,
-        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct)
+        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct, bool allowCreate = false)
     {
-        var path = _resolver.ResolveExisting(name);
+        // Create-on-import: Resolve (validate + contain) instead of ResolveExisting, so the
+        // always-create engine constructor materialises the directory; still never an unvalidated path.
+        var path = allowCreate ? _resolver.Resolve(name) : _resolver.ResolveExisting(name);
         var entry = _entries.GetOrAdd(name, _ => new DbEntry());
         await entry.WriteGate.WaitAsync(ct);
         try
@@ -99,13 +108,15 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
                     await Task.Delay(25, ct);
                 }
                 WordlistDatabase db;
-                lock (entry.Gate) db = entry.Handle = Open(path, mode, entry);
+                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry); entry.Writing = true; }
                 try { return await work(db, ct); }
                 finally
                 {
+                    // Always reopen Read (Dispose flushes; WAL is off), even when work failed or was cancelled.
                     lock (entry.Gate)
                     {
-                        entry.Handle?.Dispose();   // flushes
+                        entry.Writing = false;
+                        entry.Handle?.Dispose();
                         entry.Handle = null;
                         entry.Handle = Open(path, DbOpenMode.Read, entry);
                     }

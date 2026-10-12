@@ -5,3 +5,21 @@ public sealed class InvalidDbNameException(string message) : Exception(message);
 
 /// <summary>No RocksDB directory with that name exists under the data root (HTTP 404).</summary>
 public sealed class DbNotFoundException(string message) : Exception(message);
+
+/// <summary>The db is mid-import/compact; reads are refused rather than blocked for hours (HTTP 409).</summary>
+public sealed class DbBusyException(string message) : Exception(message);
+
+/// <summary>The import source path is syntactically invalid or escapes the incoming root (HTTP 400).</summary>
+public sealed class InvalidSourcePathException(string message) : Exception(message);
+
+/// <summary>The import source does not exist or is not a regular, non-empty file (HTTP 404).</summary>
+public sealed class SourceNotFoundException(string message) : Exception(message);
+
+/// <summary>An upload exceeded the configured cap (HTTP 413).</summary>
+public sealed class UploadTooLargeException(string message) : Exception(message);
+
+/// <summary>No such job (HTTP 404).</summary>
+public sealed class JobNotFoundException(string message) : Exception(message);
+
+/// <summary>File imports/uploads need Storage:IncomingRoot, which is not configured (HTTP 404).</summary>
+public sealed class IncomingNotConfiguredException(string message) : Exception(message);

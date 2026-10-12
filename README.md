@@ -75,9 +75,9 @@ crackdb hashpw
 
 Run `crackdb --help` for the full list of commands and options.
 
-## Web app (read-only)
+## Web app
 
-`src/CrackDB.Web` serves the same engine over HTTP: a small login-protected UI plus a JSON API for stats, count, lookup and streamed export. It is meant to sit behind a TLS-terminating reverse proxy (e.g. Caddy) on the same host; Kestrel binds `http://127.0.0.1:5080` by default and trusts `X-Forwarded-*` from loopback only. Session cookies are HttpOnly, Secure and SameSite=Strict, so the UI must be reached over HTTPS.
+`src/CrackDB.Web` serves the same engine over HTTP: a small login-protected UI plus a JSON API for stats, count, lookup, streamed export, and background import / compact jobs with live progress. It is meant to sit behind a TLS-terminating reverse proxy (e.g. Caddy) on the same host; Kestrel binds `http://127.0.0.1:5080` by default and trusts `X-Forwarded-*` from loopback only. Session cookies are HttpOnly, Secure and SameSite=Strict, so the UI must be reached over HTTPS.
 
 RocksDB allows only one process per database directory, so the web app must be the only process holding a database open: do not run the CLI against a database while the web app is serving it.
 
@@ -87,6 +87,8 @@ Configuration is read from `appsettings.json` and environment variables prefixed
 |---|---|---|
 | `CRACKDB_Storage__DataRoot` | yes | Existing directory whose subdirectories are the databases. |
 | `CRACKDB_Storage__KeyPath` | yes | Directory for the Data Protection key ring (keep it private, mode 0700) so sessions survive restarts. |
+| `CRACKDB_Storage__IncomingRoot` | no | Existing directory that server-side imports are read from (e.g. `/data/incoming`); browser uploads are staged in its `.uploads` subfolder. Unset disables file import and upload (compact still works). |
+| `CRACKDB_Upload__MaxBytes` | no | Hard cap for a browser upload in bytes (default 2147483648, 2 GiB). Put very large lists in the incoming folder instead. |
 | `CRACKDB_Auth__Username` | yes | Login user name. |
 | `CRACKDB_Auth__PasswordHash` | yes | Output of `crackdb hashpw`. |
 | `CRACKDB_Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
@@ -112,6 +114,17 @@ Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; 
 - `GET /api/dbs/{name}/count[?min=&max=&length=]` - approximate total, or an exact count when a bound is given.
 - `GET /api/dbs/{name}/lookup?word=...` - exact membership. The word is in the URL, so it can appear in proxy access logs.
 - `POST /api/dbs/{name}/export` - streamed `.txt` download ordered by length then password; JSON body or form fields `min`, `max`, `length`, `limit`.
+
+Import and compact run as background jobs, one at a time (a bulk import uses several GB of RAM), and jobs are kept in memory only: they are lost on restart, but a re-run is safe because import dedups. Large lists should be copied into `IncomingRoot` and imported by path; the file is streamed, never loaded whole. While a database is importing or compacting, reads of that database return 409 (other databases are unaffected). Job routes (same auth as above; errors are problem JSON):
+
+- `POST /api/jobs/import` - JSON `{ "db", "source", "min"?, "max"? }`. `source` is a path relative to `IncomingRoot` (no `..`, absolute paths, dot-prefixed names or symlinks); `db` is created if it does not exist. Returns 202 `{ "id" }`.
+- `POST /api/jobs/upload` - `multipart/form-data` with the fields `db`, optional `min`/`max`, then the `file` part last. Streamed to a temporary file and deleted when the job ends; over the cap is 413.
+- `POST /api/jobs/compact` - JSON `{ "db" }`; the database must exist (404 otherwise). A running compaction cannot be cancelled.
+- `GET /api/jobs` - recent and active jobs; `GET /api/jobs/{id}` - one job (poll this from scripts).
+- `GET /api/jobs/{id}/events` - Server-Sent Events progress snapshots, ending after the final one. Session cookie only (`EventSource` cannot send `X-API-Key`).
+- `POST /api/jobs/{id}/cancel` - stops an import after the current line (data already read is kept and flushed) or removes a queued job.
+
+Import reports lines read and an approximate count of new entries (before/after estimate), not exact duplicates.
 
 Database names must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and be a RocksDB directory directly under `DataRoot`; anything else is 400 or 404.
 

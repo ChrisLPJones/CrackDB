@@ -2,6 +2,7 @@ using System.Net;
 using System.Threading.RateLimiting;
 using CrackDB.Web.Auth;
 using CrackDB.Web.Endpoints;
+using CrackDB.Web.Jobs;
 using CrackDB.Web.Options;
 using CrackDB.Web.Storage;
 using Microsoft.AspNetCore.Authentication;
@@ -13,6 +14,7 @@ using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 // CrackDB web host: read-only API + static UI over the engine, behind single-user auth.
@@ -33,12 +35,23 @@ services.AddOptions<StorageOptions>().BindConfiguration(StorageOptions.Section).
 services.AddOptions<AuthOptions>().BindConfiguration(AuthOptions.Section).ValidateOnStart();
 services.AddSingleton<IValidateOptions<StorageOptions>, StorageOptionsValidator>();
 services.AddSingleton<IValidateOptions<AuthOptions>, AuthOptionsValidator>();
+services.AddOptions<UploadOptions>().BindConfiguration(UploadOptions.Section).ValidateOnStart();
+services.AddSingleton<IValidateOptions<UploadOptions>, UploadOptionsValidator>();
 
 // Storage
 services.AddSingleton<DataRootResolver>();
 services.AddSingleton<DbManager>();
 services.AddSingleton<IDbManager>(sp => sp.GetRequiredService<DbManager>());
 services.AddHostedService(sp => sp.GetRequiredService<DbManager>());   // StopAsync closes every handle
+
+// Background jobs (P3). The job worker is registered AFTER DbManager on purpose: hosted services stop
+// in reverse order, so the worker stops (cancels the running import, reopens Read, flushes) first and
+// only then does DbManager close the handles.
+services.AddSingleton<IncomingPathResolver>();
+services.AddSingleton<JobRegistry>();
+services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
+services.AddSingleton<JobQueue>();
+services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
 
 // Data Protection keys persisted so sessions survive restarts (key dir must be 0700, owner crackdb).
 // Configured lazily from options so the path is read after all configuration sources are in.
@@ -155,6 +168,7 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Text("ok")).AllowAnonymous();
 app.MapAuth();
 app.MapApi();
+app.MapJobs();
 
 app.Run();
 
@@ -167,6 +181,12 @@ internal sealed class ApiExceptionHandler(IProblemDetailsService problems, ILogg
         {
             InvalidDbNameException => (400, "Invalid database name."),
             DbNotFoundException => (404, "Database not found."),
+            DbBusyException => (409, "Database is busy (import or compact in progress)."),
+            InvalidSourcePathException => (400, "Invalid source path."),
+            SourceNotFoundException => (404, "Source file not found."),
+            JobNotFoundException => (404, "Job not found."),
+            IncomingNotConfiguredException => (404, "Server-side import is not configured."),
+            UploadTooLargeException => (413, "Upload exceeds the size limit."),
             BadHttpRequestException b => (b.StatusCode, "Bad request."),
             OperationCanceledException when ctx.RequestAborted.IsCancellationRequested => (499, "Client closed request."),
             _ => (500, "An unexpected error occurred."),

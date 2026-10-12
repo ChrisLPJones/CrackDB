@@ -45,6 +45,41 @@
     <div id="count" class="result"></div>
   </section>
 
+  <section id="import-panel">
+    <h2>Import</h2>
+    <p class="hint">Loads a wordlist into a database (created if new). Reads of that database are refused while it is importing. Duplicates are removed automatically.</p>
+    <label for="idb">Target database</label>
+    <select id="idb"></select>
+    <label for="inew">Or a new database name</label>
+    <input id="inew" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
+    <label for="isrc">Server file (path inside the incoming folder)</label>
+    <input id="isrc" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. lists/big.txt">
+    <div class="row">
+      <div><label for="imin">Min length</label><input id="imin" type="number" min="0"></div>
+      <div><label for="imax">Max length</label><input id="imax" type="number" min="0"></div>
+    </div>
+    <button id="importbtn" class="primary" type="button">Start import</button>
+    <hr>
+    <label for="ifile">Or upload a small file from this browser</label>
+    <input id="ifile" type="file">
+    <button id="uploadbtn" type="button">Upload and import</button>
+    <p id="importerror" class="error" role="alert"></p>
+
+    <div id="job" class="job" hidden>
+      <div class="jobhead"><strong id="jobtitle"></strong><span id="jobstatus" class="badge"></span></div>
+      <progress id="jobbar" max="100" value="0"></progress>
+      <dl id="jobstats"></dl>
+      <p id="joberror" class="error" role="alert"></p>
+      <button id="jobcancel" type="button">Cancel</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Compact</h2>
+    <p class="hint">Rewrites the selected database into fewer files for faster reads. Reads are refused while it runs, and a running compaction cannot be cancelled.</p>
+    <button id="compactbtn" type="button">Compact selected database</button>
+  </section>
+
   <section>
     <h2>Export</h2>
     <form id="export" method="post">
