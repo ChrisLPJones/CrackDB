@@ -91,6 +91,8 @@ Configuration is read from `appsettings.json` and environment variables prefixed
 | `CRACKDB_Auth__PasswordHash` | yes | Output of `crackdb hashpw`. |
 | `CRACKDB_Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
 | `CRACKDB_Auth__LoginAttemptsPerMinute` | no | Login attempts per client IP per minute (default 5). |
+| `CRACKDB_ForwardedProxies` | no | Comma/space-separated IP addresses of reverse proxies (other than loopback) trusted to send `X-Forwarded-For`/`-Proto`, e.g. your Caddy host. Default: loopback only. Invalid values abort startup. |
+| `CRACKDB_ForwardedNetworks` | no | Same, as CIDRs (e.g. `192.168.50.0/24`). Only list networks where nothing but your proxy can reach the app port. |
 
 Make an API key and its hash (keep the key itself out of config files; only the hash goes in the environment):
 ```
