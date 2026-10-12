@@ -40,12 +40,13 @@ $scFlag = if ($selfContained) { "--self-contained" } else { "--no-self-contained
 
 Write-Host "Publishing crackdb.exe ($Runtime, $(if ($selfContained) {'self-contained'} else {'framework-dependent'}))..." -ForegroundColor Cyan
 
-dotnet publish -c Release -r $Runtime $scFlag `
+$project = Join-Path $PSScriptRoot "src/CrackDB.Cli/CrackDB.Cli.csproj"
+dotnet publish $project -c Release -r $Runtime $scFlag `
     -p:PublishSingleFile=true `
     -p:IncludeAllContentForSelfExtract=true
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
 
-$publishDir = Join-Path $PSScriptRoot "bin/Release/net9.0/$Runtime/publish"
+$publishDir = Join-Path $PSScriptRoot "src/CrackDB.Cli/bin/Release/net9.0/$Runtime/publish"
 $exeName = if ($Runtime -like "win-*") { "crackdb.exe" } else { "crackdb" }
 $exePath = Join-Path $publishDir $exeName
 if (-not (Test-Path $exePath)) { throw "Expected exe not found at $exePath" }
