@@ -76,7 +76,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         lock (entry.Gate)
         {
             if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
-            while (entry.Swapping && !_closed) Monitor.Wait(entry.Gate);   // brief, sync park (drain / reopen)
+            while (entry.Swapping && !entry.Writing && !_closed) Monitor.Wait(entry.Gate);   // brief, sync park (drain / reopen); wakes when Writing starts
             if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
             if (_closed) throw new ObjectDisposedException(nameof(DbManager));
             entry.Handle ??= Open(path, DbOpenMode.Read, entry);
@@ -108,7 +108,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
                     await Task.Delay(25, ct);
                 }
                 WordlistDatabase db;
-                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry); entry.Writing = true; }
+                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry); entry.Writing = true; Monitor.PulseAll(entry.Gate); }
                 try { return await work(db, ct); }
                 finally
                 {

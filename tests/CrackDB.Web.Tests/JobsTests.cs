@@ -4,6 +4,8 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using CrackDB.Web.Jobs;
+using CrackDB.Web.Storage;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CrackDB.Web.Tests;
 
@@ -99,6 +101,43 @@ public class JobsTests
         Assert.Equal("completed", ja.GetProperty("status").GetString());
         Assert.Equal("completed", jb.GetProperty("status").GetString());
         Assert.True(jb.GetProperty("startedAt").GetDateTimeOffset() >= ja.GetProperty("endedAt").GetDateTimeOffset());
+    }
+
+    [Fact]
+    public async Task Read_DuringDrainWindow_FailsFastWith409_NotParkedForWholeImport()
+    {
+        var hook = new BlockingHook();
+        using var f = new CrackDbWebFactory(1000, null, null, hook);
+        var c = await f.NewLoggedInClientAsync();
+        WriteFile(f, "a.txt", 3000); WriteFile(f, "b.txt", 3000);
+        var first = await Import(c, "Test_drain", "a.txt");      // hook not armed: creates the db
+        await WaitStatus(c, first, "completed");
+
+        var mgr = f.Services.GetRequiredService<IDbManager>();
+        var lease = mgr.AcquireRead("Test_drain");                 // holds Readers > 0 so the write window stays in drain
+        hook.Arm();
+        var second = await Import(c, "Test_drain", "b.txt");
+
+        // Wait (bounded) until the write window has claimed the handle (Swapping) but cannot drain yet.
+        var entries = typeof(DbManager).GetField("_entries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(mgr)!;
+        var entry = ((System.Collections.IDictionary)entries)["Test_drain"]!;
+        var swapping = entry.GetType().GetField("Swapping")!;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!(bool)swapping.GetValue(entry)! && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.True((bool)swapping.GetValue(entry)!);
+        Assert.False(hook.Reached.IsSet);
+
+        // This reader parks in the drain window (Swapping, not yet Writing).
+        var reader = Task.Run(() => mgr.AcquireRead("Test_drain"));
+        await Task.Delay(200);
+        Assert.False(reader.IsCompleted);
+
+        lease.Dispose();                                           // drain completes -> Writing=true -> parked reader must wake
+        Assert.True(hook.Reached.Wait(TimeSpan.FromSeconds(30)));  // import is now mid-write and blocked in the hook
+        await Assert.ThrowsAsync<DbBusyException>(() => reader.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        hook.Disarm();
+        Assert.Equal("completed", (await WaitStatus(c, second, "completed", "failed")).GetProperty("status").GetString());
     }
 
     // ---- 2. correctness + create-on-import ----
