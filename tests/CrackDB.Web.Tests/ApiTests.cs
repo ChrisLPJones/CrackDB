@@ -293,22 +293,41 @@ public class ApiTests : IClassFixture<CrackDbWebFactory>
         Assert.True(got);
     }
 
+        // Runs the real app as a child process instead of through WebApplicationFactory. With a failing
+    // ValidateOnStart the factory's deferred host races the entry point's host disposal and can surface an
+    // ObjectDisposedException('IServiceProvider') instead of the validation error (framework behaviour,
+    // not an app bug), so the in-process variant was flaky. The process exit is deterministic.
     [Fact]
-    public void Startup_FailsFast_WithoutCredentials()
+    public async Task Startup_FailsFast_WithoutCredentials()
     {
         var root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
         CrackDbWebFactory.EnsureThrowaway(root);
         Directory.CreateDirectory(root);
         try
         {
-            using var f = new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>().WithWebHostBuilder(b =>
-                b.ConfigureAppConfiguration((_, c) => c.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["Storage:DataRoot"] = root,
-                    ["Storage:KeyPath"] = Path.Combine(root, "keys"),
-                })));
-            var ex = Assert.Throws<Microsoft.Extensions.Options.OptionsValidationException>(() => f.CreateClient());
-            Assert.Contains("Auth:PasswordHash is required", string.Join(" ", ex.Failures));
+            var dll = typeof(Program).Assembly.Location;
+            var psi = new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                WorkingDirectory = root,
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(dll);
+            foreach (var k in psi.Environment.Keys.Where(k => k.StartsWith("CRACKDB_", StringComparison.OrdinalIgnoreCase)).ToList())
+                psi.Environment.Remove(k);
+            psi.Environment["CRACKDB_Storage__DataRoot"] = root;
+            psi.Environment["CRACKDB_Storage__KeyPath"] = Path.Combine(root, "keys");
+            psi.Environment["ASPNETCORE_URLS"] = "http://127.0.0.1:0";
+
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            var output = Task.WhenAll(proc.StandardOutput.ReadToEndAsync(), proc.StandardError.ReadToEndAsync());
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            try { await proc.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { proc.Kill(entireProcessTree: true); throw; }
+            var text = string.Join("\n", await output);
+
+            Assert.NotEqual(0, proc.ExitCode);
+            Assert.Contains("OptionsValidationException", text);
+            Assert.Contains("Auth:PasswordHash is required", text);
         }
         finally { Directory.Delete(root, true); }
     }

@@ -45,6 +45,9 @@ public sealed class Job
     public int? Min { get; init; }
     public int? Max { get; init; }
 
+    /// <summary>Counts a skipped input (e.g. an overlong line) so it shows in the job's error count.</summary>
+    public void AddError() { lock (_gate) _errors++; }
+
     public CancellationTokenSource Cts { get; } = new();
 
     public JobStatus Status { get { lock (_gate) return _status; } }

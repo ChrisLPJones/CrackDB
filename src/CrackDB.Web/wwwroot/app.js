@@ -18,24 +18,42 @@ async function loadDbs(selectName) {
   try {
     const { databases } = await api('/api/dbs');
     const sel = $('db');
+    const keep = sel.value;
     sel.replaceChildren(...databases.map((n) => new Option(n, n)));
-    $('idb').replaceChildren(new Option('(use the new name below)', ''), ...databases.map((n) => new Option(n, n)));
-    if (selectName && databases.includes(selectName)) { sel.value = selectName; $('idb').value = selectName; }
+    if (selectName && databases.includes(selectName)) sel.value = selectName;
+    else if (databases.includes(keep)) sel.value = keep;
     show('dberror', databases.length ? '' : 'No databases found.');
-    updateExportAction();
+    onDbChanged();
   } catch (e) { fail('dberror', e); }
 }
 
 function updateExportAction() { $('export').action = '/api/dbs/' + enc(db()) + '/export'; }
 
-$('db').addEventListener('change', updateExportAction);
+// Cheap approximate size: refreshed on db selection and when a job finishes (no polling).
+async function loadSize() {
+  if (!db()) { show('size', ''); return; }
+  const wanted = db();
+  try {
+    const s = await api('/api/dbs/' + enc(wanted) + '/stats?full=false');
+    if (db() === wanted) show('size', '~' + fmt(s.estimatedCount) + ' passwords (approximate)');
+  } catch (e) { if (db() === wanted) fail('size', e); }
+}
+
+function onDbChanged() {
+  updateExportAction();
+  show('stats', '');
+  loadSize();
+}
+
+$('db').addEventListener('change', onDbChanged);
 
 $('statsbtn').addEventListener('click', async () => {
+  if (!db()) return;
   show('stats', 'Loading...');
   try {
-    const s = await api('/api/dbs/' + enc(db()) + '/stats?full=' + $('full').checked);
+    const s = await api('/api/dbs/' + enc(db()) + '/stats?full=true');
     const out = $('stats');
-    out.textContent = '~' + fmt(s.estimatedCount) + ' passwords (approximate)';
+    out.textContent = '';
     if (s.lengths) {
       const t = document.createElement('table');
       t.append(...s.lengths.map((l) => {
@@ -47,24 +65,6 @@ $('statsbtn').addEventListener('click', async () => {
       out.append(t);
     }
   } catch (e) { fail('stats', e); }
-});
-
-$('lookupbtn').addEventListener('click', async () => {
-  try {
-    const r = await api('/api/dbs/' + enc(db()) + '/lookup?word=' + enc($('word').value));
-    show('lookup', r.found ? 'FOUND: in the database.' : 'NOT FOUND.');
-  } catch (e) { fail('lookup', e); }
-});
-
-$('countbtn').addEventListener('click', async () => {
-  const q = new URLSearchParams();
-  if ($('cmin').value !== '') q.set('min', $('cmin').value);
-  if ($('cmax').value !== '') q.set('max', $('cmax').value);
-  show('count', 'Counting...');
-  try {
-    const r = await api('/api/dbs/' + enc(db()) + '/count?' + q);
-    show('count', (r.exact ? '' : '~') + fmt(r.count) + (r.exact ? ' passwords' : ' passwords (approximate total)'));
-  } catch (e) { fail('count', e); }
 });
 
 // ---- import / compact jobs ----
@@ -89,9 +89,6 @@ $('createbtn').addEventListener('click', async () => {
     await loadDbs(name);
   } catch (e) { fail('createerror', e); }
 });
-
-function importTarget() { return $('inew').value.trim() || $('idb').value; }
-function intOrNull(id) { return $(id).value === '' ? null : Number($(id).value); }
 
 function fmtBytes(n) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; n = Number(n);
@@ -132,13 +129,13 @@ function renderJob(j) {
   $('jobcancel').textContent = j.status === 'queued' ? 'Remove from queue' : 'Cancel';
   if (done) {
     closeEvents();
-    loadDbs();
+    loadDbs();   // also refreshes the size
     setBusy(false);
   }
 }
 
 function closeEvents() { if (events) { events.close(); events = null; } }
-function setBusy(b) { for (const id of ['importbtn', 'uploadbtn', 'compactbtn']) $(id).disabled = b; }
+function setBusy(b) { $('uploadbtn').disabled = b; }
 
 function track(id) {
   closeEvents();
@@ -163,30 +160,16 @@ async function start(promise) {
   catch (e) { fail('importerror', e); }
 }
 
-$('importbtn').addEventListener('click', () => {
-  const dbName = importTarget();
-  if (!dbName) return show('importerror', 'Choose a database or enter a new name.');
-  if (!$('isrc').value.trim()) return show('importerror', 'Enter the server file path.');
-  start(post('/api/jobs/import', { db: dbName, source: $('isrc').value.trim(), min: intOrNull('imin'), max: intOrNull('imax') }));
-});
-
 $('uploadbtn').addEventListener('click', () => {
-  const dbName = importTarget();
+  const dbName = db();
   const file = $('ifile').files[0];
-  if (!dbName) return show('importerror', 'Choose a database or enter a new name.');
+  if (!dbName) return show('importerror', 'Select or create a database first.');
   if (!file) return show('importerror', 'Choose a file to upload.');
   const fd = new FormData();   // order matters: text fields first, the file last
   fd.append('db', dbName);
-  if ($('imin').value !== '') fd.append('min', $('imin').value);
-  if ($('imax').value !== '') fd.append('max', $('imax').value);
   fd.append('file', file, file.name);
   show('importerror', 'Uploading...');
   start(api('/api/jobs/upload', { method: 'POST', body: fd }));
-});
-
-$('compactbtn').addEventListener('click', () => {
-  if (!db()) return show('importerror', 'Select a database to compact.');
-  start(post('/api/jobs/compact', { db: db() }));
 });
 
 $('jobcancel').addEventListener('click', async () => {
