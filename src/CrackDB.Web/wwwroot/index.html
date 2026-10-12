@@ -14,6 +14,15 @@
   </header>
 
   <section>
+    <h2>Create database</h2>
+    <p class="hint">Makes a new, empty database you can then import into.</p>
+    <label for="newdb">New database name</label>
+    <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
+    <button id="createbtn" class="primary" type="button">Create database</button>
+    <p id="createerror" class="error" role="alert"></p>
+  </section>
+
+  <section>
     <h2>Database</h2>
     <label for="db">Select a database</label>
     <select id="db"></select>

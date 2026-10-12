@@ -110,6 +110,7 @@ Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; 
 
 - `GET /healthz` - `ok`.
 - `GET /api/dbs` - database names.
+- `POST /api/dbs` - JSON `{ "name" }` creates a new, empty database. Returns 201 `{ "name" }`; 400 for an invalid name, 409 if it already exists or the database limit (512) is reached.
 - `GET /api/dbs/{name}/stats[?full=true]` - approximate total; `full` adds an exact per-length breakdown (full scan).
 - `GET /api/dbs/{name}/count[?min=&max=&length=]` - approximate total, or an exact count when a bound is given.
 - `GET /api/dbs/{name}/lookup?word=...` - exact membership. The word is in the URL, so it can appear in proxy access logs.

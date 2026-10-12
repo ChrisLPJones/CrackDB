@@ -17,7 +17,13 @@ public interface IDbManager
     /// <paramref name="allowCreate"/> lets an import materialise a brand-new db; compact leaves it off.
     /// </summary>
     Task<T> WithWriteAsync<T>(string name, DbOpenMode mode,
-        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct, bool allowCreate = false);
+        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct,
+        bool allowCreate = false, bool failIfExists = false);
+    /// <summary>
+    /// Creates a new, empty database (left open for reads). <see cref="DbAlreadyExistsException"/> (409)
+    /// if it exists, <see cref="DbLimitReachedException"/> (409) at the database-count cap.
+    /// </summary>
+    Task CreateAsync(string name, CancellationToken ct);
 }
 
 /// <summary>
@@ -63,9 +69,20 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     private static readonly Encoding Utf8 = new UTF8Encoding(false);
     private readonly DataRootResolver _resolver;
     private readonly ConcurrentDictionary<string, DbEntry> _entries = new(StringComparer.Ordinal);
+    private readonly int _maxDatabases;
     private bool _closed;
 
-    public DbManager(DataRootResolver resolver) => _resolver = resolver;
+    /// <summary>Soft cap on databases under the data root; each created db keeps an open handle (and its threads) until shutdown.</summary>
+    public const int DefaultMaxDatabases = 512;
+
+    public DbManager(DataRootResolver resolver, int maxDatabases = DefaultMaxDatabases)
+    {
+        _resolver = resolver;
+        _maxDatabases = maxDatabases;
+    }
+
+    public Task CreateAsync(string name, CancellationToken ct) =>
+        WithWriteAsync(name, DbOpenMode.Read, (_, _) => Task.FromResult(true), ct, allowCreate: true, failIfExists: true);
 
     public IReadOnlyList<string> ListDatabases() => _resolver.List();
 
@@ -86,15 +103,23 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     }
 
     public async Task<T> WithWriteAsync<T>(string name, DbOpenMode mode,
-        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct, bool allowCreate = false)
+        Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct,
+        bool allowCreate = false, bool failIfExists = false)
     {
         // Create-on-import: Resolve (validate + contain) instead of ResolveExisting, so the
         // always-create engine constructor materialises the directory; still never an unvalidated path.
         var path = allowCreate ? _resolver.Resolve(name) : _resolver.ResolveExisting(name);
+        if (failIfExists && !DataRootResolver.IsDatabaseDir(path)) EnsureRoom();   // cheap pre-check so rejected creates don't add entries
         var entry = _entries.GetOrAdd(name, _ => new DbEntry());
         await entry.WriteGate.WaitAsync(ct);
         try
         {
+            // Race-free against a concurrent create/import of the same name: checked inside the gate.
+            if (failIfExists)
+            {
+                if (DataRootResolver.IsDatabaseDir(path)) throw new DbAlreadyExistsException("Database already exists.");
+                EnsureRoom();
+            }
             // Claim the handle, then wait (without holding the monitor across an await) for readers to drain.
             lock (entry.Gate) entry.Swapping = true;
             try
@@ -128,6 +153,11 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             }
         }
         finally { entry.WriteGate.Release(); }
+    }
+
+    private void EnsureRoom()
+    {
+        if (_resolver.List().Count >= _maxDatabases) throw new DbLimitReachedException("Database limit reached.");
     }
 
     private static WordlistDatabase Open(string path, DbOpenMode mode, DbEntry entry)

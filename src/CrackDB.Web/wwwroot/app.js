@@ -14,12 +14,13 @@ function show(id, text) { $(id).textContent = text; }
 function fail(id, e) { show(id, e.message === 'signed out' ? '' : e.message); }
 const fmt = (n) => Number(n).toLocaleString();
 
-async function loadDbs() {
+async function loadDbs(selectName) {
   try {
     const { databases } = await api('/api/dbs');
     const sel = $('db');
     sel.replaceChildren(...databases.map((n) => new Option(n, n)));
     $('idb').replaceChildren(new Option('(use the new name below)', ''), ...databases.map((n) => new Option(n, n)));
+    if (selectName && databases.includes(selectName)) { sel.value = selectName; $('idb').value = selectName; }
     show('dberror', databases.length ? '' : 'No databases found.');
     updateExportAction();
   } catch (e) { fail('dberror', e); }
@@ -76,6 +77,17 @@ const post = (path, body) => api(path, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
+});
+
+$('createbtn').addEventListener('click', async () => {
+  const name = $('newdb').value.trim();
+  if (!name) { show('createerror', 'Enter a database name.'); return; }
+  try {
+    await post('/api/dbs', { name });
+    show('createerror', '');
+    $('newdb').value = '';
+    await loadDbs(name);
+  } catch (e) { fail('createerror', e); }
 });
 
 function importTarget() { return $('inew').value.trim() || $('idb').value; }

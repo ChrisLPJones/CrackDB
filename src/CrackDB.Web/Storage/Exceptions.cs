@@ -23,3 +23,9 @@ public sealed class JobNotFoundException(string message) : Exception(message);
 
 /// <summary>File imports/uploads need Storage:IncomingRoot, which is not configured (HTTP 404).</summary>
 public sealed class IncomingNotConfiguredException(string message) : Exception(message);
+
+/// <summary>A database with that name already exists (HTTP 409).</summary>
+public sealed class DbAlreadyExistsException(string message) : Exception(message);
+
+/// <summary>The data root already holds the maximum number of databases (HTTP 409).</summary>
+public sealed class DbLimitReachedException(string message) : Exception(message);

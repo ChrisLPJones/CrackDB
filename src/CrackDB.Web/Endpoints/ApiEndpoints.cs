@@ -13,6 +13,12 @@ public static class ApiEndpoints
 
         api.MapGet("/dbs", (IDbManager dbs) => Results.Ok(new { databases = dbs.ListDatabases() }));
 
+        api.MapPost("/dbs", async (CreateDbRequest req, IDbManager dbs, CancellationToken ct) =>
+        {
+            await dbs.CreateAsync(req.Name!, ct);   // null/invalid names are rejected by the resolver (400)
+            return Results.Json(new { name = req.Name }, statusCode: StatusCodes.Status201Created);
+        });
+
         api.MapGet("/dbs/{name}/stats", (string name, bool? full, IDbManager dbs) =>
         {
             using var lease = dbs.AcquireRead(name);
@@ -52,6 +58,8 @@ public static class ApiEndpoints
             return new StreamingExportResult(lease, name, min, max, req.Limit);
         });
     }
+
+    private sealed record CreateDbRequest(string? Name);
 
     private static IResult Problem(int status, string detail) =>
         Results.Problem(statusCode: status, detail: detail);
