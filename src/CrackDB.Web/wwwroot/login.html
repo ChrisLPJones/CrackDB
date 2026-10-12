@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrackDB sign in</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="login">
+  <h1>CrackDB</h1>
+  <form id="login" class="card" method="post" action="/login">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <p id="error" class="error" role="alert"></p>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+</main>
+<script src="/login.js"></script>
+</body>
+</html>
