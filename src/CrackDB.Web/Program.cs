@@ -182,6 +182,8 @@ internal sealed class ApiExceptionHandler(IProblemDetailsService problems, ILogg
             InvalidDbNameException => (400, "Invalid database name."),
             DbNotFoundException => (404, "Database not found."),
             DbBusyException => (409, "Database is busy (import or compact in progress)."),
+            DbAlreadyExistsException => (409, "Database already exists."),
+            DbLimitReachedException => (409, "Database limit reached."),
             InvalidSourcePathException => (400, "Invalid source path."),
             SourceNotFoundException => (404, "Source file not found."),
             JobNotFoundException => (404, "Job not found."),
