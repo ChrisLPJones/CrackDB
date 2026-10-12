@@ -31,6 +31,7 @@ static class Cli
                 case "stats":  return Stats(dbPath, opts);
                 case "compact": return Compact(dbPath, opts);
                 case "bench":  return Bench(opts);
+                case "hashpw": return HashPw();
                 default:
                     Console.Error.WriteLine($"Unknown command '{command}'. Run 'crackdb --help'.");
                     return 1;
@@ -240,6 +241,43 @@ static class Cli
         return 0;
     }
 
+    // Prints the PBKDF2 hash the web app expects in CRACKDB_Auth__PasswordHash. The password is read
+    // from stdin only (never argv/env), so it cannot leak into shell history or the process list.
+    static int HashPw()
+    {
+        string? password;
+        if (Console.IsInputRedirected)
+        {
+            password = Console.In.ReadLine()?.TrimEnd('\r');
+        }
+        else
+        {
+            password = ReadHidden("Password: ");
+            if (password != null && password != ReadHidden("Confirm password: "))
+            {
+                Console.Error.WriteLine("hashpw: passwords do not match.");
+                return 1;
+            }
+        }
+        if (string.IsNullOrEmpty(password)) { Console.Error.WriteLine("hashpw: empty password."); return 1; }
+        Console.WriteLine(new Microsoft.AspNetCore.Identity.PasswordHasher<string>().HashPassword("crackdb", password));
+        return 0;
+    }
+
+    static string? ReadHidden(string prompt)
+    {
+        Console.Error.Write(prompt);
+        var sb = new StringBuilder();
+        ConsoleKeyInfo k;
+        while ((k = Console.ReadKey(intercept: true)).Key != ConsoleKey.Enter)
+        {
+            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; }
+            else if (!char.IsControl(k.KeyChar)) sb.Append(k.KeyChar);
+        }
+        Console.Error.WriteLine();
+        return sb.ToString();
+    }
+
     // Isolates the cost of each import stage so we can see where time goes.
     static int Bench(Options opts)
     {
@@ -355,6 +393,7 @@ USAGE
   crackdb count                [--db <dir>] [--min N] [--max N] [--length N]
   crackdb stats                [--db <dir>] [--full]
   crackdb compact              [--db <dir>]
+  crackdb hashpw               (reads the password from stdin)
 
 COMMANDS
   import   Add one or more wordlists to the database. Arguments may be files,
@@ -368,6 +407,8 @@ COMMANDS
   stats    Show approximate total; --full does an exact per-length breakdown.
   compact  Rewrite the database into few files for fastest reads (run after
            big imports; import defers compaction to stay fast).
+  hashpw   Read a password from stdin (hidden prompt on a terminal, or one piped
+           line) and print the hash for the web app's CRACKDB_Auth__PasswordHash.
 
 OPTIONS
   --db <dir>      Database directory (default: crackdb).

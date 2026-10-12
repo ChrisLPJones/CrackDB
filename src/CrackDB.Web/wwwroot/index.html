@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrackDB</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <header class="bar">
+    <h1>CrackDB</h1>
+    <button id="logout" type="button">Sign out</button>
+  </header>
+
+  <section>
+    <h2>Database</h2>
+    <label for="db">Select a database</label>
+    <select id="db"></select>
+    <p id="dberror" class="error" role="alert"></p>
+  </section>
+
+  <section>
+    <h2>Stats</h2>
+    <div class="check"><input id="full" type="checkbox"><label for="full">Exact length breakdown (scans the whole database)</label></div>
+    <button id="statsbtn" class="primary" type="button">Load stats</button>
+    <div id="stats" class="result"></div>
+  </section>
+
+  <section>
+    <h2>Lookup</h2>
+    <label for="word">Exact password</label>
+    <input id="word" type="text" autocomplete="off" spellcheck="false">
+    <button id="lookupbtn" class="primary" type="button">Check</button>
+    <div id="lookup" class="result"></div>
+  </section>
+
+  <section>
+    <h2>Count</h2>
+    <div class="row">
+      <div><label for="cmin">Min length</label><input id="cmin" type="number" min="0"></div>
+      <div><label for="cmax">Max length</label><input id="cmax" type="number" min="0"></div>
+    </div>
+    <button id="countbtn" class="primary" type="button">Count</button>
+    <div id="count" class="result"></div>
+  </section>
+
+  <section>
+    <h2>Export</h2>
+    <form id="export" method="post">
+      <div class="row">
+        <div><label for="emin">Min length</label><input id="emin" name="min" type="number" min="0"></div>
+        <div><label for="emax">Max length</label><input id="emax" name="max" type="number" min="0"></div>
+        <div><label for="elimit">Limit</label><input id="elimit" name="limit" type="number" min="0"></div>
+      </div>
+      <button class="primary" type="submit">Download .txt</button>
+    </form>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
