@@ -25,10 +25,16 @@ CrackDB is a command-line tool for importing wordlists into a database and expor
    ```
    cd CrackDB
    ```
-3. Build the project:
+3. Build the solution:
    ```
    dotnet build -c Release
    ```
+   The CLI is built from `src/CrackDB.Cli`; run it with `dotnet run --project src/CrackDB.Cli -- <command>` or use the built `crackdb` executable under `src/CrackDB.Cli/bin/Release/net9.0/`.
+
+To run the engine tests:
+```
+dotnet test
+```
 
 To produce a single self-contained executable that requires no .NET installation on the target machine, run the included script. The finished `crackdb.exe` is written to the `dist` folder:
 ```
@@ -86,10 +92,12 @@ FOUND    : 'hunter2' is in the database.
 
 ## Project Structure
 
-- `Program.cs` - Command-line interface and command handling.
-- `WordlistDatabase.cs` - Storage engine covering import, export, lookup, and compaction.
-- `Progress.cs` - Live progress bars for import and export.
-- `build-exe.ps1` - Builds a single self-contained executable.
+- `CrackDB.sln` - Solution containing all projects below.
+- `src/CrackDB.Core/` - Class library with the storage engine (`WordlistDatabase.cs`) covering import, export, lookup, and compaction.
+- `src/CrackDB.Cli/` - The `crackdb` command-line tool: `Program.cs` (command handling) and `Progress.cs` (live progress bars).
+- `src/CrackDB.Web/` - ASP.NET Core web host (skeleton for now; serves `/healthz` on `http://localhost:5080`).
+- `tests/CrackDB.Core.Tests/` - xUnit tests for the engine; they only use throwaway `Test_`-prefixed temp databases.
+- `build-exe.ps1` - Builds a single self-contained executable of the CLI.
 
 ## How It Works
 
