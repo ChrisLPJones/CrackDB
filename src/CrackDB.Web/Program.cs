@@ -48,10 +48,13 @@ services.AddHostedService(sp => sp.GetRequiredService<DbManager>());   // StopAs
 // in reverse order, so the worker stops (cancels the running import, reopens Read, flushes) first and
 // only then does DbManager close the handles.
 services.AddSingleton<IncomingPathResolver>();
+services.TryAddSingleton<IDiskSpace, DriveDiskSpace>();
 services.AddSingleton<JobRegistry>();
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
 services.AddSingleton<JobQueue>();
 services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
+// Registered after JobQueue so it stops first on shutdown (reverse order).
+services.AddHostedService<WeeklyCompactionService>();
 
 // Data Protection keys persisted so sessions survive restarts (key dir must be 0700, owner crackdb).
 // Configured lazily from options so the path is read after all configuration sources are in.

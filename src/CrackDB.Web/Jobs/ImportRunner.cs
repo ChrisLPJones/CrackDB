@@ -24,6 +24,8 @@ public static class ImportRunner
 {
     public const int HookEvery = 1024;
     private const int BufferBytes = 1 << 20;
+    /// <summary>Longest line imported. Longer ones are skipped (counted as errors) without being buffered.</summary>
+    public const int MaxLineChars = 8 * 1024;
 
     public static async Task RunAsync(Job job, IDbManager dbs, IImportProgressHook hook, CancellationToken ct)
     {
@@ -46,16 +48,17 @@ public static class ImportRunner
         IImportProgressHook hook, CancellationToken ct)
     {
         long n = 0;
-        string? line;
-        while (!ct.IsCancellationRequested && (line = reader.ReadLine()) != null)
+        var lines = new BoundedLineReader(reader, MaxLineChars);
+        while (!ct.IsCancellationRequested && lines.TryReadLine(out var line, out var overlong))
         {
             n++;
+            if (overlong) job.AddError();
             if ((n & (HookEvery - 1)) == 0)
             {
                 job.SetProgress(n, fs.Position);
                 hook.OnLines(job.DbName, n);
             }
-            yield return line;
+            if (!overlong) yield return line!;
         }
         // Falling out of the loop (EOF or cancel) ends the sequence cleanly.
     }

@@ -88,7 +88,7 @@ Configuration is read from `appsettings.json` and environment variables prefixed
 | `CRACKDB_Storage__DataRoot` | yes | Existing directory whose subdirectories are the databases. |
 | `CRACKDB_Storage__KeyPath` | yes | Directory for the Data Protection key ring (keep it private, mode 0700) so sessions survive restarts. |
 | `CRACKDB_Storage__IncomingRoot` | no | Existing directory that server-side imports are read from (e.g. `/data/incoming`); browser uploads are staged in its `.uploads` subfolder. Unset disables file import and upload (compact still works). |
-| `CRACKDB_Upload__MaxBytes` | no | Hard cap for a browser upload in bytes (default 2147483648, 2 GiB). Put very large lists in the incoming folder instead. |
+| `CRACKDB_Upload__MaxBytes` | no | Cap for a browser upload in bytes. Unset or `0` (the default) means no limit; the file is streamed to disk and the upload is refused with 507 if free disk space runs low. A reverse proxy in front may impose its own body-size limit. |
 | `CRACKDB_Auth__Username` | yes | Login user name. |
 | `CRACKDB_Auth__PasswordHash` | yes | Output of `crackdb hashpw`. |
 | `CRACKDB_Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
@@ -119,8 +119,8 @@ Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; 
 Import and compact run as background jobs, one at a time (a bulk import uses several GB of RAM), and jobs are kept in memory only: they are lost on restart, but a re-run is safe because import dedups. Large lists should be copied into `IncomingRoot` and imported by path; the file is streamed, never loaded whole. While a database is importing or compacting, reads of that database return 409 (other databases are unaffected). Job routes (same auth as above; errors are problem JSON):
 
 - `POST /api/jobs/import` - JSON `{ "db", "source", "min"?, "max"? }`. `source` is a path relative to `IncomingRoot` (no `..`, absolute paths, dot-prefixed names or symlinks); `db` is created if it does not exist. Returns 202 `{ "id" }`.
-- `POST /api/jobs/upload` - `multipart/form-data` with the fields `db`, optional `min`/`max`, then the `file` part last. Streamed to a temporary file and deleted when the job ends; over the cap is 413.
-- `POST /api/jobs/compact` - JSON `{ "db" }`; the database must exist (404 otherwise). A running compaction cannot be cancelled.
+- `POST /api/jobs/upload` - `multipart/form-data` with the fields `db`, optional `min`/`max`, then the `file` part last. Streamed to a temporary file and deleted when the job ends; over the cap (when `Upload:MaxBytes` is set) is 413, low free disk space is 507, and only one upload runs at a time (a second gets 409). Lines longer than 8 KiB are skipped and counted in the job's `errors`.
+- `POST /api/jobs/compact` - JSON `{ "db" }`; the database must exist (404 otherwise). A running compaction cannot be cancelled. Every database is also compacted automatically each Sunday at 00:00 UTC through the same job queue (no catch-up if the server was down at that time).
 - `GET /api/jobs` - recent and active jobs; `GET /api/jobs/{id}` - one job (poll this from scripts).
 - `GET /api/jobs/{id}/events` - Server-Sent Events progress snapshots, ending after the final one. Session cookie only (`EventSource` cannot send `X-API-Key`).
 - `POST /api/jobs/{id}/cancel` - stops an import after the current line (data already read is kept and flushed) or removes a queued job.

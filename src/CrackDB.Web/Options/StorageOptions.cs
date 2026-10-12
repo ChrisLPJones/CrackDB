@@ -21,18 +21,18 @@ public sealed class StorageOptions
     public string IncomingRoot { get; set; } = "";
 }
 
-/// <summary>Browser-upload limits. Env: CRACKDB_Upload__MaxBytes (default 2 GiB).</summary>
+/// <summary>Browser-upload limits. Env: CRACKDB_Upload__MaxBytes (0 or unset = unlimited).</summary>
 public sealed class UploadOptions
 {
     public const string Section = "Upload";
-    public long MaxBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+    public long MaxBytes { get; set; }
 }
 
 public sealed class UploadOptionsValidator : IValidateOptions<UploadOptions>
 {
     public ValidateOptionsResult Validate(string? name, UploadOptions o) =>
-        o.MaxBytes > 0 ? ValidateOptionsResult.Success
-            : ValidateOptionsResult.Fail("Upload:MaxBytes must be greater than zero.");
+        o.MaxBytes >= 0 ? ValidateOptionsResult.Success
+            : ValidateOptionsResult.Fail("Upload:MaxBytes must be zero (unlimited) or greater.");
 }
 
 public sealed class StorageOptionsValidator : IValidateOptions<StorageOptions>

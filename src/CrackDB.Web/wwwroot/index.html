@@ -14,64 +14,22 @@
   </header>
 
   <section>
-    <h2>Create database</h2>
-    <p class="hint">Makes a new, empty database you can then import into.</p>
-    <label for="newdb">New database name</label>
-    <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
-    <button id="createbtn" class="primary" type="button">Create database</button>
-    <p id="createerror" class="error" role="alert"></p>
-  </section>
-
-  <section>
     <h2>Database</h2>
     <label for="db">Select a database</label>
     <select id="db"></select>
     <p id="dberror" class="error" role="alert"></p>
-  </section>
-
-  <section>
-    <h2>Stats</h2>
-    <div class="check"><input id="full" type="checkbox"><label for="full">Exact length breakdown (scans the whole database)</label></div>
-    <button id="statsbtn" class="primary" type="button">Load stats</button>
-    <div id="stats" class="result"></div>
-  </section>
-
-  <section>
-    <h2>Lookup</h2>
-    <label for="word">Exact password</label>
-    <input id="word" type="text" autocomplete="off" spellcheck="false">
-    <button id="lookupbtn" class="primary" type="button">Check</button>
-    <div id="lookup" class="result"></div>
-  </section>
-
-  <section>
-    <h2>Count</h2>
-    <div class="row">
-      <div><label for="cmin">Min length</label><input id="cmin" type="number" min="0"></div>
-      <div><label for="cmax">Max length</label><input id="cmax" type="number" min="0"></div>
-    </div>
-    <button id="countbtn" class="primary" type="button">Count</button>
-    <div id="count" class="result"></div>
+    <label for="newdb">Or create a new, empty database</label>
+    <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
+    <button id="createbtn" class="primary" type="button">Create</button>
+    <p id="createerror" class="error" role="alert"></p>
   </section>
 
   <section id="import-panel">
     <h2>Import</h2>
-    <p class="hint">Loads a wordlist into a database (created if new). Reads of that database are refused while it is importing. Duplicates are removed automatically.</p>
-    <label for="idb">Target database</label>
-    <select id="idb"></select>
-    <label for="inew">Or a new database name</label>
-    <input id="inew" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
-    <label for="isrc">Server file (path inside the incoming folder)</label>
-    <input id="isrc" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. lists/big.txt">
-    <div class="row">
-      <div><label for="imin">Min length</label><input id="imin" type="number" min="0"></div>
-      <div><label for="imax">Max length</label><input id="imax" type="number" min="0"></div>
-    </div>
-    <button id="importbtn" class="primary" type="button">Start import</button>
-    <hr>
-    <label for="ifile">Or upload a small file from this browser</label>
+    <p class="hint">Uploads a wordlist from this browser into the selected database. Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
+    <label for="ifile">Wordlist file</label>
     <input id="ifile" type="file">
-    <button id="uploadbtn" type="button">Upload and import</button>
+    <button id="uploadbtn" class="primary" type="button">Upload and import</button>
     <p id="importerror" class="error" role="alert"></p>
 
     <div id="job" class="job" hidden>
@@ -84,21 +42,27 @@
   </section>
 
   <section>
-    <h2>Compact</h2>
-    <p class="hint">Rewrites the selected database into fewer files for faster reads. Reads are refused while it runs, and a running compaction cannot be cancelled.</p>
-    <button id="compactbtn" type="button">Compact selected database</button>
-  </section>
-
-  <section>
     <h2>Export</h2>
     <form id="export" method="post">
       <div class="row">
         <div><label for="emin">Min length</label><input id="emin" name="min" type="number" min="0"></div>
         <div><label for="emax">Max length</label><input id="emax" name="max" type="number" min="0"></div>
-        <div><label for="elimit">Limit</label><input id="elimit" name="limit" type="number" min="0"></div>
       </div>
       <button class="primary" type="submit">Download .txt</button>
     </form>
+  </section>
+
+  <section>
+    <h2>Statistics</h2>
+    <p class="hint">Databases are compacted automatically every Sunday at 00:00 UTC.</p>
+    <div id="size" class="result"></div>
+  </section>
+
+  <section>
+    <h2>Full length breakdown</h2>
+    <p class="hint">Exact count per password length. This scans the whole database, so it can take a while on large ones.</p>
+    <button id="statsbtn" class="primary" type="button">Load full breakdown</button>
+    <div id="stats" class="result"></div>
   </section>
 </main>
 <script src="/app.js"></script>
