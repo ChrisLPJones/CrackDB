@@ -25,6 +25,8 @@ input[type=text], input[type=password], input[type=number], select { width: 100%
 .row > div { flex: 1 1 120px; min-width: 0; }
 button { cursor: pointer; margin-top: 12px; }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.danger { background: var(--danger); color: var(--accent-text); border-color: var(--danger); }
+button.danger:disabled { opacity: .6; cursor: not-allowed; }
 .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text); }
 .check input { width: auto; }
 .error { color: var(--danger); min-height: 1.5em; }

@@ -1,4 +1,5 @@
 using System.Text;
+using CrackDB.Web.Jobs;
 using CrackDB.Web.Storage;
 
 namespace CrackDB.Web.Endpoints;
@@ -17,6 +18,17 @@ public static class ApiEndpoints
         {
             await dbs.CreateAsync(req.Name!, ct);   // null/invalid names are rejected by the resolver (400)
             return Results.Json(new { name = req.Name }, statusCode: StatusCodes.Status201Created);
+        });
+
+        api.MapDelete("/dbs/{name}", async (string name, IDbManager dbs, JobRegistry jobs, CancellationToken ct) =>
+        {
+            // Layer 1: refuse while a queued or running job targets this db. Layer 2 is DeleteAsync's fail-fast
+            // WriteGate. Known residual: a job enqueued between this check and the gate is not seen (a queued
+            // import would later re-create the name); not reachable through the single-user UI. Jobs are never cancelled here.
+            if (jobs.List().Any(j => j.Db == name && !IsTerminal(j.Status)))
+                throw new DbBusyException("Database is busy.");
+            await dbs.DeleteAsync(name, ct);
+            return Results.NoContent();
         });
 
         api.MapGet("/dbs/{name}/stats", (string name, bool? full, IDbManager dbs) =>
@@ -58,6 +70,8 @@ public static class ApiEndpoints
             return new StreamingExportResult(lease, name, min, max, req.Limit);
         });
     }
+
+    private static bool IsTerminal(string status) => status is "completed" or "failed" or "cancelled";
 
     private sealed record CreateDbRequest(string? Name);
 

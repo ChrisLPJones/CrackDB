@@ -93,6 +93,34 @@ $('createbtn').addEventListener('click', async () => {
   } catch (e) { fail('createerror', e); }
 });
 
+function closeDelete() { $('delconfirm').hidden = true; $('delname').value = ''; }
+
+$('deltoggle').addEventListener('click', () => {
+  if (!db()) { show('deleteerror', 'Select a database first.'); return; }
+  show('deleteerror', '');
+  $('delname').value = '';
+  $('delconfirm').hidden = false;
+  $('delname').focus();
+});
+$('delcancel').addEventListener('click', () => { closeDelete(); show('deleteerror', ''); });
+
+$('delbtn').addEventListener('click', async () => {
+  const name = db();
+  if (!name) { show('deleteerror', 'Select a database first.'); return; }
+  if ($('delname').value !== name) { show('deleteerror', 'Type the exact database name to confirm.'); return; }
+  const btn = $('delbtn');
+  btn.disabled = true;
+  try {
+    await api('/api/dbs/' + enc(name), { method: 'DELETE' });
+    show('deleteerror', '');
+    closeDelete();
+    show('stats', '');
+    show('size', '');
+    await loadDbs();
+  } catch (e) { fail('deleteerror', e); }
+  finally { btn.disabled = false; }
+});
+
 function fmtBytes(n) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; n = Number(n);
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }

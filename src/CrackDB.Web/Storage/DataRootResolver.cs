@@ -36,7 +36,10 @@ public sealed partial class DataRootResolver
             throw new InvalidDbNameException("Invalid database name.");
 
         // A symlink in the data root must not lead outside it.
-        if (Directory.Exists(full) && Directory.ResolveLinkTarget(full, returnFinalTarget: true) is { } target)
+        FileSystemInfo? link = null;
+        try { if (Directory.Exists(full)) link = Directory.ResolveLinkTarget(full, returnFinalTarget: true); }
+        catch (DirectoryNotFoundException) { }   // deleted between Exists and the link check: nothing to follow
+        if (link is { } target)
         {
             var realRoot = RealRoot();
             var realTarget = Path.GetFullPath(target.FullName).TrimEnd(Path.DirectorySeparatorChar);
