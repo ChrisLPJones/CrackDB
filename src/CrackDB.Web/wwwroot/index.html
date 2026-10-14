@@ -26,9 +26,9 @@
 
   <section id="import-panel">
     <h2>Import</h2>
-    <p class="hint">Uploads a wordlist from this browser into the selected database. Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
-    <label for="ifile">Wordlist file</label>
-    <input id="ifile" type="file">
+    <p class="hint">Uploads one or more wordlists from this browser into the currently selected database, one at a time (each file is imported before the next is uploaded). Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
+    <label for="ifile">Wordlist file(s)</label>
+    <input id="ifile" type="file" multiple>
     <button id="uploadbtn" class="primary" type="button">Upload and import</button>
     <p id="importerror" class="error" role="alert"></p>
 
