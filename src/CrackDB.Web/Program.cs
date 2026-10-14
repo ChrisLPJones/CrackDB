@@ -69,6 +69,7 @@ services.AddOptions<KeyManagementOptions>().Configure<IOptions<StorageOptions>, 
 
 // Auth: cookie for the browser, X-API-Key for scripts; a policy scheme picks per request.
 services.AddSingleton<CredentialVerifier>();
+services.AddSingleton<AccountEndpoints.State>();
 services.AddAuthentication(CredentialVerifier.SchemeSmart)
     .AddPolicyScheme(CredentialVerifier.SchemeSmart, null, o =>
         o.ForwardDefaultSelector = ctx =>
@@ -92,6 +93,16 @@ services.AddAuthentication(CredentialVerifier.SchemeSmart)
             else ctx.Response.Redirect(ctx.RedirectUri);
             return Task.CompletedTask;
         };
+        // Fail closed: a cookie without the current password stamp (older cookie, or password changed) is rejected.
+        o.Events.OnValidatePrincipal = async ctx =>
+        {
+            var stamp = ctx.HttpContext.RequestServices.GetRequiredService<CredentialVerifier>().CurrentStamp;
+            if (ctx.Principal?.FindFirst(AuthEndpoints.StampClaim)?.Value != stamp)
+            {
+                ctx.RejectPrincipal();
+                await ctx.HttpContext.SignOutAsync(CredentialVerifier.SchemeCookie);
+            }
+        };
         o.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
     });
 services.AddAuthorizationBuilder()
@@ -114,12 +125,19 @@ services.AddRateLimiter(o =>
                 QueueLimit = 0,
             });
     });
+    o.AddPolicy(AccountEndpoints.PasswordLimiter, ctx =>
+    {
+        var permits = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.PasswordChangeAttemptsPerMinute;
+        return RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 });
+    });
     o.OnRejected = async (ctx, ct) =>
     {
         ctx.HttpContext.Response.Headers.RetryAfter = "60";
         ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         await ctx.HttpContext.Response.WriteAsJsonAsync(
-            new ProblemDetails { Status = 429, Title = "Too many login attempts." }, cancellationToken: ct);
+            new ProblemDetails { Status = 429, Title = ctx.HttpContext.Request.Path.StartsWithSegments("/login") ? "Too many login attempts." : "Too many attempts." }, cancellationToken: ct);
     };
 });
 
@@ -131,6 +149,9 @@ services.AddProblemDetails();
 services.AddExceptionHandler<ApiExceptionHandler>();
 
 var app = builder.Build();
+
+// Load the admin password store now so a corrupt admin-password.json aborts startup (not the first login).
+_ = app.Services.GetRequiredService<CredentialVerifier>();
 
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
@@ -171,6 +192,7 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Text("ok")).AllowAnonymous();
 app.MapAuth();
 app.MapApi();
+app.MapAccount();
 app.MapJobs();
 
 app.Run();
