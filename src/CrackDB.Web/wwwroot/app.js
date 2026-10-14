@@ -72,6 +72,9 @@ $('statsbtn').addEventListener('click', async () => {
 const TERMINAL = ['completed', 'failed', 'cancelled'];
 let events = null;
 let currentJob = null;
+let batch = null;       // { index, total, cancelled, xhr } while a multi-file upload runs
+let jobWaiter = null;   // { id, resolve } - lets the batch loop await a job's terminal state
+const batchSuffix = () => (batch ? ' (file ' + batch.index + ' of ' + batch.total + ')' : '');
 
 const post = (path, body) => api(path, {
   method: 'POST',
@@ -104,7 +107,7 @@ function fmtElapsed(j) {
 function renderJob(j) {
   currentJob = j;
   $('job').hidden = false;
-  $('jobtitle').textContent = (j.kind === 'import' ? 'Import into ' : 'Compact ') + j.db;
+  $('jobtitle').textContent = (j.kind === 'import' ? 'Import into ' : 'Compact ') + j.db + batchSuffix();
   const st = $('jobstatus'); st.textContent = j.status; st.className = 'badge ' + j.status;
   const bar = $('jobbar');
   if (j.kind === 'import' && j.bytesTotal > 0) { bar.max = 100; bar.value = Math.min(100, (j.bytesRead / j.bytesTotal) * 100); }
@@ -130,7 +133,8 @@ function renderJob(j) {
   if (done) {
     closeEvents();
     loadDbs();   // also refreshes the size
-    setBusy(false);
+    if (jobWaiter && jobWaiter.id === j.id) { const w = jobWaiter; jobWaiter = null; w.resolve(j); }
+    else if (!batch) setBusy(false);   // a running batch keeps the button disabled until it finishes
   }
 }
 
@@ -150,29 +154,117 @@ function track(id) {
       const j = await api('/api/jobs/' + enc(id));
       renderJob(j);
       if (!TERMINAL.includes(j.status)) setTimeout(() => track(id), 2000);
-    } catch (e) { fail('joberror', e); setBusy(false); }
+    } catch (e) {
+      fail('joberror', e);
+      closeEvents();
+      // The job can no longer be followed (e.g. server restart): fail the batch's file so it moves on.
+      // Nulling jobWaiter first makes a later real terminal snapshot a no-op (resolves only once).
+      if (jobWaiter && jobWaiter.id === id) {
+        const w = jobWaiter; jobWaiter = null; currentJob = null;
+        w.resolve({ status: 'failed', error: e.message });
+      } else if (!batch) setBusy(false);
+    }
   };
 }
 
-async function start(promise) {
-  show('importerror', '');
-  try { track((await promise).id); }
-  catch (e) { fail('importerror', e); }
+// Upload via XHR (fetch cannot report upload progress). Mirrors api(): 401 -> login, errors use the
+// JSON detail message. Resolves with the parsed 202 body ({ id }).
+function uploadXhr(fd, onProgress, onXhr) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    onXhr(xhr);
+    xhr.open('POST', '/api/jobs/upload');
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+    xhr.onload = () => {
+      if (xhr.status === 401) { location.href = '/login.html'; reject(new Error('signed out')); return; }
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON body */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.detail || data.title || ('Request failed (' + xhr.status + ')')));
+    };
+    xhr.onerror = () => reject(new Error('Upload failed.'));
+    xhr.onabort = () => reject(new Error('cancelled'));
+    xhr.send(fd);
+  });
+}
+
+// Phase 1 (browser -> server transfer). File names are untrusted: textContent only.
+function renderUpload(name, loaded, total) {
+  $('job').hidden = false;
+  currentJob = null;
+  $('jobtitle').textContent = 'Uploading ' + name + batchSuffix();
+  const st = $('jobstatus'); st.textContent = 'uploading'; st.className = 'badge running';
+  const pct = total > 0 ? Math.min(100, (loaded / total) * 100) : 0;
+  const bar = $('jobbar'); bar.max = 100; bar.value = pct;
+  const dt = document.createElement('dt'); dt.textContent = 'Uploaded';
+  const dd = document.createElement('dd');
+  dd.textContent = Math.floor(pct) + '% (' + fmtBytes(loaded) + ' / ' + fmtBytes(total) + ')';
+  $('jobstats').replaceChildren(dt, dd);
+  show('joberror', '');
+  $('jobcancel').hidden = false;
+  $('jobcancel').textContent = 'Cancel';
+}
+
+// Known limitation: the batch state lives in memory only. A page reload mid-batch re-attaches to the
+// active job (see below) but does not resume the files that were not yet sent.
+// Files are sent one at a time and each import must finish before the next upload starts, so the
+// server's single-upload gate never answers 409 and only one job is ever active.
+async function runBatch(dbName, files) {
+  batch = { index: 0, total: files.length, cancelled: false, xhr: null };
+  setBusy(true);
+  const failures = [];
+  let imported = 0;
+  for (const file of files) {
+    if (batch.cancelled) break;
+    batch.index++;
+    const fd = new FormData();   // order matters: text fields first, the file last
+    fd.append('db', dbName);
+    fd.append('file', file, file.name);
+    renderUpload(file.name, 0, file.size);
+    try {
+      const { id } = await uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
+      batch.xhr = null;
+      const finished = new Promise((resolve) => { jobWaiter = { id, resolve }; });
+      track(id);
+      const j = await finished;
+      if (j.status === 'completed') imported++;
+      else if (!batch.cancelled) failures.push(file.name + ': ' + (j.error || j.status));
+    } catch (e) {
+      batch.xhr = null;
+      if (e.message === 'signed out') { batch = null; setBusy(false); return; }
+      if (!batch.cancelled) failures.push(file.name + ': ' + e.message);
+    }
+  }
+  const b = batch;
+  batch = null; jobWaiter = null;
+  setBusy(false);
+  // Clean final state: no live Cancel button, and no stale "Uploading..." panel when the last file
+  // never reached the import phase (phase-1 cancel/abort or upload error). A job that reached a
+  // terminal state keeps its final panel (renderJob already hid Cancel).
+  $('jobcancel').hidden = true;
+  if (!currentJob) $('job').hidden = true;
+  let msg = imported + ' of ' + b.total + ' imported';
+  if (b.cancelled) msg += '; cancelled after file ' + b.index + ' of ' + b.total + ' (remaining skipped)';
+  if (failures.length) msg += '; ' + failures.length + ' failed: ' + failures.join('; ');
+  show('importerror', msg);
+  $('ifile').value = '';
+  loadDbs();
 }
 
 $('uploadbtn').addEventListener('click', () => {
+  if (batch) return;
   const dbName = db();
-  const file = $('ifile').files[0];
+  const files = Array.from($('ifile').files);
   if (!dbName) return show('importerror', 'Select or create a database first.');
-  if (!file) return show('importerror', 'Choose a file to upload.');
-  const fd = new FormData();   // order matters: text fields first, the file last
-  fd.append('db', dbName);
-  fd.append('file', file, file.name);
-  show('importerror', 'Uploading...');
-  start(api('/api/jobs/upload', { method: 'POST', body: fd }));
+  if (!files.length) return show('importerror', 'Choose a file to upload.');
+  show('importerror', '');
+  runBatch(dbName, files);
 });
 
 $('jobcancel').addEventListener('click', async () => {
+  if (batch) batch.cancelled = true;   // skip the remaining files
+  if (batch && batch.xhr) { batch.xhr.abort(); return; }   // phase 1: still uploading
   if (!currentJob) return;
   try { renderJob(await api('/api/jobs/' + enc(currentJob.id) + '/cancel', { method: 'POST' })); }
   catch (e) { fail('joberror', e); }
