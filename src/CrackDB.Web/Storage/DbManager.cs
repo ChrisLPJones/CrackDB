@@ -24,6 +24,12 @@ public interface IDbManager
     /// if it exists, <see cref="DbLimitReachedException"/> (409) at the database-count cap.
     /// </summary>
     Task CreateAsync(string name, CancellationToken ct);
+    /// <summary>
+    /// Permanently deletes one database directory. <see cref="DbNotFoundException"/> (404) if it does not
+    /// exist (including a second delete), <see cref="InvalidDbNameException"/> (400) for a bad name,
+    /// <see cref="DbBusyException"/> (409) if a write window (import/compact/create) holds the db (fail-fast).
+    /// </summary>
+    Task DeleteAsync(string name, CancellationToken ct);
 }
 
 /// <summary>
@@ -64,6 +70,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         public int Readers;
         public bool Swapping;                          // a write window is claiming/releasing the handle; readers park briefly
         public bool Writing;                           // the write work is running; readers fail fast (409)
+        public bool Gone;                              // the db was deleted; this entry is orphaned (readers 404, writers re-fetch)
     }
 
     private static readonly Encoding Utf8 = new UTF8Encoding(false);
@@ -92,10 +99,14 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         var entry = _entries.GetOrAdd(name, _ => new DbEntry());
         lock (entry.Gate)
         {
+            if (entry.Gone) throw new DbNotFoundException("Database not found.");
             if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
             while (entry.Swapping && !entry.Writing && !_closed) Monitor.Wait(entry.Gate);   // brief, sync park (drain / reopen); wakes when Writing starts
+            if (entry.Gone) throw new DbNotFoundException("Database not found.");   // deleted while we were parked: never reopen (engine ctor would recreate the dir)
             if (entry.Writing && !_closed) throw new DbBusyException("Database is busy (import or compact in progress).");
             if (_closed) throw new ObjectDisposedException(nameof(DbManager));
+            // The dir may have been deleted between ResolveExisting and here (fresh entry after a delete): never let the always-create ctor resurrect it.
+            if (entry.Handle == null && !DataRootResolver.IsDatabaseDir(path)) throw new DbNotFoundException("Database not found.");
             entry.Handle ??= Open(path, DbOpenMode.Read, entry);
             entry.Readers++;
             return new DbLease(entry, entry.Handle);
@@ -110,8 +121,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         // always-create engine constructor materialises the directory; still never an unvalidated path.
         var path = allowCreate ? _resolver.Resolve(name) : _resolver.ResolveExisting(name);
         if (failIfExists && !DataRootResolver.IsDatabaseDir(path)) EnsureRoom();   // cheap pre-check so rejected creates don't add entries
-        var entry = _entries.GetOrAdd(name, _ => new DbEntry());
-        await entry.WriteGate.WaitAsync(ct);
+        var entry = await AcquireWriteGateAsync(name, ct);
         try
         {
             // Race-free against a concurrent create/import of the same name: checked inside the gate.
@@ -150,6 +160,57 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             finally
             {
                 lock (entry.Gate) { entry.Swapping = false; Monitor.PulseAll(entry.Gate); }
+            }
+        }
+        finally { entry.WriteGate.Release(); }
+    }
+
+    /// <summary>Takes the name's WriteGate. If the entry was orphaned by a delete while we waited, retries on the fresh entry.</summary>
+    private async Task<DbEntry> AcquireWriteGateAsync(string name, CancellationToken ct)
+    {
+        while (true)
+        {
+            var entry = _entries.GetOrAdd(name, _ => new DbEntry());
+            await entry.WriteGate.WaitAsync(ct);
+            if (!entry.Gone) return entry;
+            entry.WriteGate.Release();
+        }
+    }
+
+    public async Task DeleteAsync(string name, CancellationToken ct)
+    {
+        _resolver.ResolveExisting(name);   // validate + 404 if missing, before any lock
+        var entry = _entries.GetOrAdd(name, _ => new DbEntry());
+        if (!await entry.WriteGate.WaitAsync(0, ct)) throw new DbBusyException("Database is busy.");   // fail-fast, never block behind an import
+        try
+        {
+            if (entry.Gone) throw new DbNotFoundException("Database not found.");   // lost a race with another delete
+            lock (entry.Gate) entry.Swapping = true;
+            try
+            {
+                // Drain readers (no monitor held across an await), then close the handle: RocksDB holds the dir open.
+                while (true)
+                {
+                    lock (entry.Gate)
+                    {
+                        if (entry.Readers == 0) { entry.Handle?.Dispose(); entry.Handle = null; break; }
+                    }
+                    await Task.Delay(25, ct);
+                }
+
+                // Re-resolve and re-assert immediately before the destructive call; never trust the earlier path.
+                var full = _resolver.Resolve(name);
+                if (!full.StartsWith(_resolver.Root + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                    || !DataRootResolver.IsDatabaseDir(full)
+                    || new DirectoryInfo(full).LinkTarget is not null)
+                    throw new DbNotFoundException("Database not found.");
+                Directory.Delete(full, recursive: true);
+
+                lock (entry.Gate) { entry.Gone = true; _entries.TryRemove(new KeyValuePair<string, DbEntry>(name, entry)); }
+            }
+            finally
+            {
+                lock (entry.Gate) { entry.Swapping = false; Monitor.PulseAll(entry.Gate); }   // parked readers see Gone -> 404
             }
         }
         finally { entry.WriteGate.Release(); }
