@@ -91,10 +91,13 @@ Configuration is read from `appsettings.json` and environment variables prefixed
 | `CRACKDB_Upload__MaxBytes` | no | Cap for a browser upload in bytes. Unset or `0` (the default) means no limit; the file is streamed to disk and the upload is refused with 507 if free disk space runs low. A reverse proxy in front may impose its own body-size limit. |
 | `CRACKDB_Auth__Username` | yes | Login user name. |
 | `CRACKDB_Auth__PasswordHash` | yes | Output of `crackdb hashpw`. |
+| `CRACKDB_Auth__PasswordChangeAttemptsPerMinute` | no | Password-change attempts per client IP per minute (default 5). Separately, 5 wrong current-password attempts lock the change for 15 minutes (in memory). |
 | `CRACKDB_Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
 | `CRACKDB_Auth__LoginAttemptsPerMinute` | no | Login attempts per client IP per minute (default 5). |
 | `CRACKDB_ForwardedProxies` | no | Comma/space-separated IP addresses of reverse proxies (other than loopback) trusted to send `X-Forwarded-For`/`-Proto`, e.g. your Caddy host. Default: loopback only. Invalid values abort startup. |
 | `CRACKDB_ForwardedNetworks` | no | Same, as CIDRs (e.g. `192.168.50.0/24`). Only list networks where nothing but your proxy can reach the app port. |
+
+**Changing the password:** signed-in users change it on the Settings page (`/settings.html`); it needs the current password and a new one of 12-128 characters. The new hash is stored in `<KeyPath>/admin-password.json` (mode 0600, hash only) and takes precedence over `CRACKDB_Auth__PasswordHash` while that env value is unchanged, so it survives restarts and redeploys. All other sessions are signed out; the API key is not affected. Recovery if the password is lost: set a new `CRACKDB_Auth__PasswordHash` (`crackdb hashpw`) and restart (a changed env hash overrides the stored one), or delete `admin-password.json` to fall back to the env hash. A present but unreadable `admin-password.json` aborts startup (fix or delete it).
 
 Make an API key and its hash (keep the key itself out of config files; only the hash goes in the environment):
 ```
@@ -109,6 +112,7 @@ dotnet run --project src/CrackDB.Web -c Release
 Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; errors are RFC 7807 problem JSON):
 
 - `GET /healthz` - `ok`.
+- `POST /api/account/password` - JSON `{ "currentPassword", "newPassword" }`; session cookie only (an API key gets 403). 204 on success (this browser stays signed in), 403 wrong current password, 400 rule violation or bad body, 415 not JSON, 429 rate limited or locked out, 500 could not save.
 - `GET /api/dbs` - database names.
 - `POST /api/dbs` - JSON `{ "name" }` creates a new, empty database. Returns 201 `{ "name" }`; 400 for an invalid name, 409 if it already exists or the database limit (512) is reached.
 - `DELETE /api/dbs/{name}` - permanently deletes the database directory. 204 on success; 404 if it does not exist (including a repeat delete); 400 for an invalid name; 409 if an import/compact job is queued or running for it.

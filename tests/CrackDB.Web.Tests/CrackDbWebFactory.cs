@@ -31,25 +31,30 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
     private readonly int _loginLimit;
     private readonly Dictionary<string, string?> _extra;
     private readonly string? _remoteIp;
+    private readonly bool _ownsRoot;
+    /// <summary>The env (bootstrap) password hash; pass it to a second factory to simulate a restart with unchanged env.</summary>
+    public string EnvHash { get; }
 
     public CrackDbWebFactory() : this(1000) { }
 
     /// <param name="extraConfig">Extra configuration keys (e.g. ForwardedProxies).</param>
     /// <param name="remoteIp">If set, every request appears to come from this peer address (TestServer has none).</param>
     internal CrackDbWebFactory(int loginLimit, Dictionary<string, string?>? extraConfig = null, string? remoteIp = null,
-        CrackDB.Web.Jobs.IImportProgressHook? hook = null)
+        CrackDB.Web.Jobs.IImportProgressHook? hook = null, string? existingRoot = null, string? envHash = null)
     {
+        EnvHash = envHash ?? new PasswordHasher<string>().HashPassword(Username, Password);
+        _ownsRoot = existingRoot is null;
         _hook = hook;
         _loginLimit = loginLimit;
         _extra = extraConfig ?? new();
         _remoteIp = remoteIp;
-        Root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
+        Root = existingRoot ?? Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
         EnsureThrowaway(Root);
         Directory.CreateDirectory(Root);
         Incoming = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
         EnsureThrowaway(Incoming);
         Directory.CreateDirectory(Incoming);
-        Seed(Path.Combine(Root, DbName), Words);
+        if (_ownsRoot) Seed(Path.Combine(Root, DbName), Words);
     }
 
     public static void EnsureThrowaway(string path)
@@ -76,7 +81,7 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
             ["Storage:IncomingRoot"] = Incoming,
             ["Storage:KeyPath"] = Path.Combine(Root, "keys-not-a-db"),
             ["Auth:Username"] = Username,
-            ["Auth:PasswordHash"] = new PasswordHasher<string>().HashPassword(Username, Password),
+            ["Auth:PasswordHash"] = EnvHash,
             ["Auth:ApiKeyHash"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(ApiKey))),
             ["Auth:LoginAttemptsPerMinute"] = _loginLimit.ToString(),
         }.Concat(_extra)));
@@ -127,7 +132,7 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
         if (disposing)
         {
             EnsureThrowaway(Root);
-            if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
+            if (_ownsRoot && Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
             EnsureThrowaway(Incoming);
             if (Directory.Exists(Incoming)) Directory.Delete(Incoming, recursive: true);
         }
