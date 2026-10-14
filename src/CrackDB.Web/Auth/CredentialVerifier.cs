@@ -40,12 +40,20 @@ public sealed class CredentialVerifier
     /// The password hash is always verified, even for a wrong username, so timing does not
     /// reveal whether the username exists. Username compare is fixed-time on digests.
     /// </summary>
-    public bool VerifyLogin(string? username, string? password)
+    public bool VerifyLogin(string? username, string? password, out string? stamp) =>
+        VerifyLogin(username, password, out stamp, null);
+
+    // afterSnapshot is a test seam that runs after the state snapshot is taken (to simulate a racing password change).
+    internal bool VerifyLogin(string? username, string? password, out string? stamp, Action? afterSnapshot)
     {
+        var state = _state; // one snapshot: hash checked and stamp returned come from the same state
+        afterSnapshot?.Invoke();
         bool userOk = FixedTimeEquals(Sha(username ?? ""), Sha(_o.Username));
-        var result = _hasher.VerifyHashedPassword(_o.Username, _state.Hash, password ?? "");
+        var result = _hasher.VerifyHashedPassword(_o.Username, state.Hash, password ?? "");
         bool passOk = result is PasswordVerificationResult.Success or PasswordVerificationResult.SuccessRehashNeeded;
-        return userOk & passOk;
+        bool ok = userOk & passOk;
+        stamp = ok ? state.Stamp : null;
+        return ok;
     }
 
     /// <summary>Checks only the password (fixed-time PBKDF2 compare), for the current-password confirmation.</summary>

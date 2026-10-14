@@ -29,12 +29,12 @@ public static class AuthEndpoints
                 user = body?.Username; pass = body?.Password;
             }
 
-            if (!verifier.VerifyLogin(user, pass))
+            if (!verifier.VerifyLogin(user, pass, out var stamp) || stamp is null)
                 return Results.Problem(statusCode: 401, title: "Invalid username or password.");
 
             var identity = new ClaimsIdentity(
                 [new Claim(ClaimTypes.Name, verifier.Username), new Claim("auth_method", "cookie"),
-                 new Claim(StampClaim, verifier.CurrentStamp)],
+                 new Claim(StampClaim, stamp)],
                 CredentialVerifier.SchemeCookie);
             await ctx.SignInAsync(CredentialVerifier.SchemeCookie, new ClaimsPrincipal(identity));
             return form ? Results.Redirect("/") : Results.NoContent();

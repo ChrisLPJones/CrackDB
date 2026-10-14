@@ -16,4 +16,8 @@
     <PackageReference Include="Microsoft.Extensions.Identity.Core" Version="9.0.20" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CrackDB.Web.Tests" />
+  </ItemGroup>
+
 </Project>
