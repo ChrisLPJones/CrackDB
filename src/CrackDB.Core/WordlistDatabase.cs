@@ -22,13 +22,21 @@ public sealed class WordlistDatabase : IDisposable
 {
     private readonly RocksDb _db;
     private readonly Encoding _enc;
+    private readonly MemoryPlan _plan;
+
+    /// <summary>The memory plan this handle was opened with (write buffers, import pipeline sizes).</summary>
+    public MemoryPlan Plan => _plan;
 
     /// <param name="bulkLoad">
     /// Open tuned for a large import: a vector memtable (O(1) append inserts,
     /// sorted once at flush) instead of the default skiplist, which roughly
     /// halves import time. Read-only commands leave this false.
     /// </param>
-    public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false)
+    /// <param name="memoryBudgetBytes">
+    /// Memory this handle may use for memtables and the import pipeline; null = half of the
+    /// memory available to the process (see <see cref="MemoryPlan.DefaultBudgetBytes"/>).
+    /// </param>
+    public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false, long? memoryBudgetBytes = null)
     {
         _enc = encoding;
 
@@ -42,14 +50,16 @@ public sealed class WordlistDatabase : IDisposable
         // compaction-heavy import. The style is fixed at DB creation, so it is
         // applied on every open.
         int procs = Environment.ProcessorCount;
+        _plan = MemoryPlan.Compute(memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes(), procs);
         var options = new DbOptions()
             .SetCreateIfMissing(true)
             .IncreaseParallelism(procs)
             .SetMaxBackgroundCompactions(procs)
-            .SetMaxBackgroundFlushes(Math.Max(2, procs / 4))
+            .SetMaxBackgroundFlushes(_plan.Flushes)
             .SetCompactionStyle(Compaction.Universal)
-            .SetWriteBufferSize(512ul * 1024 * 1024)   // 512 MB memtable
-            .SetMaxWriteBufferNumber(8)
+            .SetWriteBufferSize(_plan.WriteBuffer)     // sized from the memory budget
+            .SetMaxWriteBufferNumber(_plan.MaxBuffers)
+            .SetDbWriteBufferSize(_plan.DbWriteBufferCap)   // global memtable cap: forces a flush instead of growing
             .SetMinWriteBufferNumberToMerge(1)
             .SetTargetFileSizeBase(512ul * 1024 * 1024)
             .SetBytesPerSync(16ul * 1024 * 1024)
@@ -113,9 +123,12 @@ public sealed class WordlistDatabase : IDisposable
         // A single writer thread caps at the memtable insert rate of one core.
         // We pipeline: this thread reads lines into chunks; several worker threads
         // build keys and write concurrently (concurrent memtable writes are on).
-        int workers = threads > 0 ? threads : Math.Clamp(Environment.ProcessorCount - 1, 2, 8);
+        // Worker/queue counts and the per-chunk size cap come from the memory plan; an explicit
+        // thread count is honored only up to what the budget allows.
+        int workers = threads > 0 ? Math.Min(threads, _plan.Workers) : _plan.Workers;
         const int chunkSize = 50_000;
-        var queue = new BlockingCollection<string[]>(boundedCapacity: workers * 3);
+        int chunkChars = _plan.ChunkChars;
+        var queue = new BlockingCollection<string[]>(boundedCapacity: _plan.QueueCapacity);
 
         var tasks = new Task[workers];
         for (int w = 0; w < workers; w++)
@@ -125,16 +138,20 @@ public sealed class WordlistDatabase : IDisposable
         long sinceReport = 0;
         var chunk = new string[chunkSize];
         int ci = 0;
+        long chars = 0;
         foreach (var raw in lines)
         {
             read++;
             if (++sinceReport >= reportEvery) { sinceReport = 0; onProgress?.Invoke(read); }
             chunk[ci++] = raw;
-            if (ci == chunkSize)
+            chars += raw.Length;
+            // Flush by count OR size: lines can be thousands of chars, so a count-only chunk can reach hundreds of MB.
+            if (ci == chunkSize || chars >= chunkChars)
             {
-                queue.Add(chunk);
-                chunk = new string[chunkSize];
+                if (ci == chunkSize) { queue.Add(chunk); chunk = new string[chunkSize]; }
+                else queue.Add(chunk[..ci]);   // size-capped: copy out, reuse the buffer
                 ci = 0;
+                chars = 0;
             }
         }
         if (ci > 0) queue.Add(chunk[..ci]);
