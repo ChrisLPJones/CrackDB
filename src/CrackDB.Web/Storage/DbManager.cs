@@ -77,15 +77,21 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     private readonly DataRootResolver _resolver;
     private readonly ConcurrentDictionary<string, DbEntry> _entries = new(StringComparer.Ordinal);
     private readonly int _maxDatabases;
+    private readonly long? _memoryBudgetBytes;
+    private readonly ILogger? _logger;
     private bool _closed;
 
     /// <summary>Soft cap on databases under the data root; each created db keeps an open handle (and its threads) until shutdown.</summary>
     public const int DefaultMaxDatabases = 512;
 
-    public DbManager(DataRootResolver resolver, int maxDatabases = DefaultMaxDatabases)
+    public DbManager(DataRootResolver resolver, int maxDatabases = DefaultMaxDatabases,
+        IOptions<StorageOptions>? storage = null, ILogger<DbManager>? logger = null)
     {
         _resolver = resolver;
         _maxDatabases = maxDatabases;
+        _logger = logger;
+        long mb = storage?.Value.ImportMemoryMb ?? 0;
+        _memoryBudgetBytes = mb > 0 ? mb * 1024 * 1024 : null;   // null = engine auto default
     }
 
     public Task CreateAsync(string name, CancellationToken ct) =>
@@ -221,14 +227,24 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         if (_resolver.List().Count >= _maxDatabases) throw new DbLimitReachedException("Database limit reached.");
     }
 
-    private static WordlistDatabase Open(string path, DbOpenMode mode, DbEntry entry)
+    private WordlistDatabase Open(string path, DbOpenMode mode, DbEntry entry)
     {
-        var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk);
+        var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk, memoryBudgetBytes: _memoryBudgetBytes);
         entry.Mode = mode;
         return db;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        // Numbers only; logged once so an operator can see what the memory budget resolved to.
+        var budget = _memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes();
+        var p = MemoryPlan.Compute(budget, Environment.ProcessorCount);
+        _logger?.LogInformation(
+            "Import memory budget {BudgetMb} MB ({Source}): {Buffers} x {BufferMb} MB write buffers, {Workers} workers, queue {Queue}",
+            budget / (1024 * 1024), _memoryBudgetBytes is null ? "auto" : "configured",
+            p.MaxBuffers, p.WriteBuffer / (1024 * 1024), p.Workers, p.QueueCapacity);
+        return Task.CompletedTask;
+    }
     public Task StopAsync(CancellationToken cancellationToken) { CloseAll(); return Task.CompletedTask; }
     public ValueTask DisposeAsync() { CloseAll(); return ValueTask.CompletedTask; }
 
