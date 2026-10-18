@@ -12,6 +12,20 @@ public static class ApiEndpoints
     {
         var api = app.MapGroup("/api").RequireAuthorization();
 
+        // A busy database is expected (a long import/compact holds it), not a server fault: answer with a
+        // friendly 409 and no exception, so it is not logged as an unhandled exception with a stack trace.
+        api.AddEndpointFilter(async (ctx, next) =>
+        {
+            try { return await next(ctx); }
+            catch (DbBusyException)
+            {
+                var jobs = ctx.HttpContext.RequestServices.GetRequiredService<JobRegistry>();
+                var name = ctx.HttpContext.GetRouteValue("name") as string;
+                return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Database is busy.",
+                    detail: BusyMessage.For(jobs, name));
+            }
+        });
+
         api.MapGet("/dbs", (IDbManager dbs) => Results.Ok(new { databases = dbs.ListDatabases() }));
 
         api.MapPost("/dbs", async (CreateDbRequest req, IDbManager dbs, CancellationToken ct) =>

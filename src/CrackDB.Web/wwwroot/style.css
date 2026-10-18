@@ -1,11 +1,13 @@
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --text: #1b1f24; --muted: #5b6573;
   --border: #d5d9e0; --accent: #2a5bd7; --accent-text: #ffffff; --danger: #b3261e;
+  --warn-bg: #fff4d6; --warn-border: #c58b00; --warn-text: #4a3500;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14171c; --surface: #1d2128; --text: #e6e9ee; --muted: #9aa4b2;
     --border: #333a45; --accent: #6b93ff; --accent-text: #0d1117; --danger: #ff8a80;
+    --warn-bg: #3a2e0c; --warn-border: #d4a017; --warn-text: #ffe9a8;
   }
 }
 * { box-sizing: border-box; }
@@ -46,3 +48,6 @@ progress { width: 100%; height: 12px; margin-top: 8px; accent-color: var(--accen
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 8px 0 0; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
+
+.banner { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border);
+  border-radius: 8px; padding: 10px 14px; margin: 12px 0; overflow-wrap: anywhere; }

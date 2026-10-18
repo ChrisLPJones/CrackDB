@@ -13,6 +13,8 @@
     <button id="logout" type="button">Sign out</button>
   </header>
 
+  <div id="banner" class="banner" role="status" hidden></div>
+
   <section>
     <h2>Database</h2>
     <label for="db">Select a database</label>
@@ -42,6 +44,7 @@
 
     <div id="job" class="job" hidden>
       <div class="jobhead"><strong id="jobtitle"></strong><span id="jobstatus" class="badge"></span></div>
+      <p id="jobwait" class="hint"></p>
       <progress id="jobbar" max="100" value="0"></progress>
       <dl id="jobstats"></dl>
       <p id="joberror" class="error" role="alert"></p>
@@ -62,7 +65,7 @@
 
   <section>
     <h2>Statistics</h2>
-    <p class="hint">Databases are compacted automatically every Sunday at 00:00 UTC.</p>
+    <p class="hint">Databases are compacted automatically every Sunday at 00:00 in the server's configured time zone (Australia/Sydney by default).</p>
     <div id="size" class="result"></div>
   </section>
 

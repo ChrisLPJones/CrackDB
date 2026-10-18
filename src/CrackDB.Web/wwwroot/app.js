@@ -132,6 +132,37 @@ function fmtElapsed(j) {
   return Math.floor(s / 3600) + 'h ' + String(Math.floor(s / 60) % 60).padStart(2, '0') + 'm ' + String(s % 60).padStart(2, '0') + 's';
 }
 
+// ---- maintenance banner / queue position: polls the (cheap, in-memory) jobs list ----
+
+let lastJobs = [];
+const activeJobs = () => lastJobs.filter((j) => !TERMINAL.includes(j.status));
+const runningJob = () => lastJobs.find((j) => j.status === 'running');
+const verbing = (j) => (j.kind === 'compact' ? 'compaction' : 'import');
+
+function renderBanner() {
+  const r = runningJob();
+  const b = $('banner');
+  if (!r) { b.hidden = true; return; }
+  b.textContent = r.kind === 'compact'
+    ? 'Maintenance in progress: database ' + r.db + ' is being compacted. Search and imports are unavailable until it finishes.'
+    : 'Import in progress: database ' + r.db + ' is being imported. Search of it is unavailable until it finishes.';
+  const waiting = activeJobs().filter((j) => j.status === 'queued').length;
+  if (waiting) b.textContent += ' ' + waiting + ' job' + (waiting === 1 ? '' : 's') + ' waiting in the queue.';
+  b.hidden = false;
+}
+
+async function pollJobs() {
+  try {
+    ({ jobs: lastJobs } = await api('/api/jobs'));
+    renderBanner();
+    if (currentJob && currentJob.status === 'queued') {
+      const mine = lastJobs.find((j) => j.id === currentJob.id);
+      if (mine) renderJob(mine);
+    }
+  } catch (e) { /* transient; try again next tick */ }
+}
+setInterval(pollJobs, 3000);
+
 function renderJob(j) {
   currentJob = j;
   $('job').hidden = false;
@@ -154,6 +185,12 @@ function renderJob(j) {
     const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd];
   }));
   show('joberror', j.error || '');
+  const ahead = j.status === 'queued' ? runningJob() : null;
+  if (j.status === 'queued') {
+    show('jobwait', ahead
+      ? 'Queued, waiting for ' + verbing(ahead) + ' of ' + ahead.db + ' to finish.'
+      : 'Queued, starting shortly.');
+  } else show('jobwait', '');
   const done = TERMINAL.includes(j.status);
   const cancellable = !done && (j.kind === 'import' || j.status === 'queued');
   $('jobcancel').hidden = !cancellable;
@@ -303,6 +340,8 @@ $('jobcancel').addEventListener('click', async () => {
   try {
     const { jobs } = await api('/api/jobs');
     const active = jobs.find((j) => !TERMINAL.includes(j.status));
+    lastJobs = jobs;
+    renderBanner();
     if (active) { renderJob(active); track(active.id); }
   } catch (e) { /* the panel just starts idle */ }
 })();

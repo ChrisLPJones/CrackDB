@@ -140,6 +140,33 @@ public class JobsTests
         Assert.Equal("completed", (await WaitStatus(c, second, "completed", "failed")).GetProperty("status").GetString());
     }
 
+    [Fact]
+    public async Task Read_WhileImporting_Returns409WithFriendlyMessage()
+    {
+        var hook = new BlockingHook();
+        using var f = new CrackDbWebFactory(1000, null, null, hook);
+        var c = await f.NewLoggedInClientAsync();
+        WriteFile(f, "a.txt", 3000);
+        await WaitStatus(c, await Import(c, "Test_busy", "a.txt"), "completed");
+        WriteFile(f, "b.txt", 3000);
+        hook.Arm();
+        var second = await Import(c, "Test_busy", "b.txt");
+        Assert.True(hook.Reached.Wait(TimeSpan.FromSeconds(30)));   // import is mid-write
+
+        var r = await c.GetAsync("/api/dbs/Test_busy/stats");
+        Assert.Equal(HttpStatusCode.Conflict, r.StatusCode);
+        var detail = (await Body(r)).GetProperty("detail").GetString();
+        Assert.Contains("Test_busy", detail);
+        Assert.Contains("imported", detail);
+        Assert.DoesNotContain(f.Root, detail);                      // no paths
+
+        var list = await Body(await c.GetAsync("/api/jobs"));
+        Assert.Contains(list.GetProperty("jobs").EnumerateArray(), j => j.GetProperty("status").GetString() == "running");
+
+        hook.Disarm();
+        await WaitStatus(c, second, "completed", "failed");
+    }
+
     // ---- 2. correctness + create-on-import ----
 
     [Fact]
