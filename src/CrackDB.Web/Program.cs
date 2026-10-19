@@ -165,7 +165,7 @@ app.UseAuthentication();
 // Static files are served before endpoint routing, so the fallback policy would not cover the app
 // shell. Gate everything except the explicit anonymous list here.
 var anonymous = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/style.css" };
+    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/style.css", "/favicon.svg" };
 app.Use(async (ctx, next) =>
 {
     if (!anonymous.Contains(ctx.Request.Path.Value ?? "") && ctx.User.Identity?.IsAuthenticated != true)
