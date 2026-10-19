@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build CrackDB into a single crackdb.exe.
+  Build HoarderDB into a single hoarderdb.exe.
 
 .DESCRIPTION
   Publishes a single-file executable. By default the exe is self-contained
@@ -33,21 +33,21 @@ Set-Location -Path $PSScriptRoot
 
 # A previously-published exe can stay locked by a still-running process and break
 # the copy step; stop any lingering instance first.
-Get-Process -Name crackdb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name hoarderdb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 $selfContained = -not $FrameworkDependent
 $scFlag = if ($selfContained) { "--self-contained" } else { "--no-self-contained" }
 
-Write-Host "Publishing crackdb.exe ($Runtime, $(if ($selfContained) {'self-contained'} else {'framework-dependent'}))..." -ForegroundColor Cyan
+Write-Host "Publishing hoarderdb.exe ($Runtime, $(if ($selfContained) {'self-contained'} else {'framework-dependent'}))..." -ForegroundColor Cyan
 
-$project = Join-Path $PSScriptRoot "src/CrackDB.Cli/CrackDB.Cli.csproj"
+$project = Join-Path $PSScriptRoot "src/HoarderDB.Cli/HoarderDB.Cli.csproj"
 dotnet publish $project -c Release -r $Runtime $scFlag `
     -p:PublishSingleFile=true `
     -p:IncludeAllContentForSelfExtract=true
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)." }
 
-$publishDir = Join-Path $PSScriptRoot "src/CrackDB.Cli/bin/Release/net9.0/$Runtime/publish"
-$exeName = if ($Runtime -like "win-*") { "crackdb.exe" } else { "crackdb" }
+$publishDir = Join-Path $PSScriptRoot "src/HoarderDB.Cli/bin/Release/net9.0/$Runtime/publish"
+$exeName = if ($Runtime -like "win-*") { "hoarderdb.exe" } else { "hoarderdb" }
 $exePath = Join-Path $publishDir $exeName
 if (-not (Test-Path $exePath)) { throw "Expected exe not found at $exePath" }
 
