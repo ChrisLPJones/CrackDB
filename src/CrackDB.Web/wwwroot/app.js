@@ -6,8 +6,15 @@ async function api(path, opts) {
   const r = await fetch(path, { credentials: 'same-origin', ...opts });
   if (r.status === 401) { location.href = '/login.html'; throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || data.title || ('Request failed (' + r.status + ')'));
+  if (!r.ok) throw httpError(r.status, data);
   return data;
+}
+
+// Errors carry the parsed problem body (status, code, duplicateOf) so callers can branch on `code`.
+function httpError(status, data) {
+  const e = new Error(data.detail || data.title || ('Request failed (' + status + ')'));
+  e.status = status; e.data = data;
+  return e;
 }
 
 function show(id, text) { $(id).textContent = text; }
@@ -43,9 +50,39 @@ function onDbChanged() {
   updateExportAction();
   show('stats', '');
   loadSize();
+  loadHistory();
 }
 
 $('db').addEventListener('change', onDbChanged);
+
+// ---- import history (advisory record of past imports; all values are untrusted text) ----
+
+const fmtDate = (s) => (s ? new Date(s).toLocaleString() : '-');
+const fmtRange = (r) => (r.min == null && r.max == null ? 'all' : (r.min == null ? 0 : r.min) + '-' + (r.max == null ? 'max' : r.max));
+
+async function loadHistory() {
+  const wanted = db();
+  const body = $('histbody');
+  if (!wanted) { body.replaceChildren(); show('histinfo', ''); return; }
+  try {
+    const h = await api('/api/dbs/' + enc(wanted) + '/imports?limit=50');
+    if (db() !== wanted) return;
+    body.replaceChildren(...h.entries.map((r) => {
+      const tr = document.createElement('tr');
+      const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
+      const st = document.createElement('td');
+      const badge = document.createElement('span'); badge.className = 'badge ' + r.status;
+      badge.textContent = r.status === 'backfilled' ? 'Backfilled' : r.status;
+      st.append(badge);
+      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)), st,
+        cell(r.sha256.slice(0, 12), r.sha256), cell(fmtRange(r) + (r.forced ? ' (forced)' : '')));
+      return tr;
+    }));
+    show('histinfo', h.total ? (h.total > h.entries.length ? 'Showing the latest ' + h.entries.length + ' of ' + h.total + '. ' : '') +
+      'Imports run from the command line are not recorded. Lines read is the count of lines in the file, not new passwords.'
+      : 'No imports recorded for this database yet.');
+  } catch (e) { if (db() === wanted) { body.replaceChildren(); fail('histinfo', e); } }
+}
 
 $('statsbtn').addEventListener('click', async () => {
   if (!db()) return;
@@ -185,6 +222,7 @@ function renderJob(j) {
     const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd];
   }));
   show('joberror', j.error || '');
+  show('jobnote', j.note || '');
   const ahead = j.status === 'queued' ? runningJob() : null;
   if (j.status === 'queued') {
     show('jobwait', ahead
@@ -197,7 +235,7 @@ function renderJob(j) {
   $('jobcancel').textContent = j.status === 'queued' ? 'Remove from queue' : 'Cancel';
   if (done) {
     closeEvents();
-    loadDbs();   // also refreshes the size
+    loadDbs();   // also refreshes the size and the history
     if (jobWaiter && jobWaiter.id === j.id) { const w = jobWaiter; jobWaiter = null; w.resolve(j); }
     else if (!batch) setBusy(false);   // a running batch keeps the button disabled until it finishes
   }
@@ -234,7 +272,7 @@ function track(id) {
 
 // Upload via XHR (fetch cannot report upload progress). Mirrors api(): 401 -> login, errors use the
 // JSON detail message. Resolves with the parsed 202 body ({ id }).
-function uploadXhr(fd, onProgress, onXhr) {
+function uploadXhr(fd, onProgress, onXhr) {   // reject(e): e.status / e.data hold the parsed error body
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     onXhr(xhr);
@@ -246,7 +284,7 @@ function uploadXhr(fd, onProgress, onXhr) {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON body */ }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else reject(new Error(data.detail || data.title || ('Request failed (' + xhr.status + ')')));
+      else reject(httpError(xhr.status, data));
     };
     xhr.onerror = () => reject(new Error('Upload failed.'));
     xhr.onabort = () => reject(new Error('cancelled'));
@@ -267,6 +305,7 @@ function renderUpload(name, loaded, total) {
   dd.textContent = Math.floor(pct) + '% (' + fmtBytes(loaded) + ' / ' + fmtBytes(total) + ')';
   $('jobstats').replaceChildren(dt, dd);
   show('joberror', '');
+  show('jobnote', '');
   $('jobcancel').hidden = false;
   $('jobcancel').textContent = 'Cancel';
 }
@@ -279,17 +318,42 @@ async function runBatch(dbName, files) {
   batch = { index: 0, total: files.length, cancelled: false, xhr: null };
   setBusy(true);
   const failures = [];
+  const skipped = [];
   let imported = 0;
+  const when = (m) => (m && m.importedAt ? new Date(m.importedAt).toLocaleDateString() : 'earlier');
+  const send = (file, force) => {
+    const fd = new FormData();   // order matters: text fields first, the file last
+    fd.append('db', dbName);
+    if (force) fd.append('force', 'true');
+    fd.append('file', file, file.name);
+    return uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
+  };
   for (const file of files) {
     if (batch.cancelled) break;
     batch.index++;
-    const fd = new FormData();   // order matters: text fields first, the file last
-    fd.append('db', dbName);
-    fd.append('file', file, file.name);
     renderUpload(file.name, 0, file.size);
     try {
-      const { id } = await uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
+      // Advisory pre-check by name and size: saves a pointless transfer; the hash check after the upload is authoritative.
+      let force = false;
+      try {
+        const chk = await post('/api/dbs/' + enc(dbName) + '/imports/check', { name: file.name, size: file.size });
+        if (chk.duplicate) {
+          if (!confirm('"' + file.name + '" looks already imported on ' + when(chk.duplicate) + '. Upload anyway?')) { skipped.push(file.name); continue; }
+          force = true;
+        }
+      } catch (e) { if (e.message === 'signed out') throw e; /* the check is only a hint */ }
+      let res;
+      try { res = await send(file, force); }
+      catch (e) {
+        if (!(e.status === 409 && e.data && e.data.code === 'already_imported')) throw e;
+        batch.xhr = null;
+        if (!confirm('"' + file.name + '" has identical content to an import on ' + when(e.data.duplicateOf) + '. Import it again anyway?')) { skipped.push(file.name); continue; }
+        renderUpload(file.name, 0, file.size);
+        res = await send(file, true);
+      }
+      const { id } = res;
       batch.xhr = null;
+      if (res.note) { show('jobnote', res.note); }
       const finished = new Promise((resolve) => { jobWaiter = { id, resolve }; });
       track(id);
       const j = await finished;
@@ -310,6 +374,7 @@ async function runBatch(dbName, files) {
   $('jobcancel').hidden = true;
   if (!currentJob) $('job').hidden = true;
   let msg = imported + ' of ' + b.total + ' imported';
+  if (skipped.length) msg += '; ' + skipped.length + ' skipped (already imported): ' + skipped.join(', ');
   if (b.cancelled) msg += '; cancelled after file ' + b.index + ' of ' + b.total + ' (remaining skipped)';
   if (failures.length) msg += '; ' + failures.length + ' failed: ' + failures.join('; ');
   show('importerror', msg);

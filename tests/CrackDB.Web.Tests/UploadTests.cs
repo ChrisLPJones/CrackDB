@@ -8,6 +8,8 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CrackDB.Web.Tests;
 
+// The upload gate is process-wide (static), so every class that uploads shares this collection and runs serially.
+[Collection("Uploads")]
 public class UploadTests
 {
     private static MultipartFormDataContent Form(string db, byte[] file, string fileName = "my list.txt", string? min = null, string? max = null)

@@ -17,6 +17,11 @@ main { max-width: 760px; margin: 0 auto; padding: 16px; }
 header.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 h1 { font-size: 1.4rem; margin: 8px 0; }
 h2 { font-size: 1.1rem; margin: 0 0 8px; }
+#history-panel summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; }
+#history-panel summary h2 { display: inline; }
+#history-panel summary::-webkit-details-marker { display: none; }
+#history-panel summary::before { content: '\25B6'; font-size: 0.75em; transition: transform 0.15s; }
+#history-panel details[open] summary::before { transform: rotate(90deg); }
 section, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 16px; margin: 16px 0; }
 label { display: block; font-size: .9rem; color: var(--muted); margin: 8px 0 2px; }
@@ -52,3 +57,11 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 .banner { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border);
   border-radius: 8px; padding: 10px 14px; margin: 12px 0; overflow-wrap: anywhere; }
+
+.tablewrap { overflow-x: auto; }
+#hist { font-size: .85rem; width: 100%; }
+#hist th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+#hist td { overflow-wrap: anywhere; vertical-align: top; padding-bottom: 4px; }
+.badge.completed { color: var(--accent); border-color: var(--accent); }
+.badge.cancelled { color: var(--muted); }
+.badge.backfilled { color: var(--muted); font-style: italic; }

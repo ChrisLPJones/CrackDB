@@ -29,3 +29,6 @@ public sealed class DbAlreadyExistsException(string message) : Exception(message
 
 /// <summary>The data root already holds the maximum number of databases (HTTP 409).</summary>
 public sealed class DbLimitReachedException(string message) : Exception(message);
+
+/// <summary>A backfill batch would push a database's import history past its entry cap (HTTP 413); rejected whole, not truncated.</summary>
+public sealed class ImportHistoryCapExceededException(string message) : Exception(message);

@@ -74,6 +74,70 @@ public static class ApiEndpoints
             return Results.Ok(new { name, word, found = lease.Db.Contains(word) });
         });
 
+        // Import history: reads the sidecar only (no DbLease), so it works while the db is importing.
+        api.MapGet("/dbs/{name}/imports", (string name, int? limit, int? offset, DataRootResolver data, IImportHistory history) =>
+        {
+            data.ResolveExisting(name);                       // 400 bad name / 404 missing
+            var page = history.List(name, Math.Clamp(limit ?? 50, 1, 200), Math.Max(0, offset ?? 0));
+            return Results.Ok(new { total = page.Total, entries = page.Entries });
+        });
+
+        api.MapPost("/dbs/{name}/imports/check", (string name, ImportCheckRequest req, DataRootResolver data, IImportHistory history) =>
+        {
+            data.ResolveExisting(name);
+            if (req.Min < 0 || req.Max < 0) return Problem(400, "min and max must be non-negative.");
+            if (req.Min > req.Max) return Problem(400, "min must be less than or equal to max.");
+            if (req.Sha256 != null)
+            {
+                if (!ImportHistory.IsValidSha256(req.Sha256)) return Problem(400, "sha256 must be 64 hexadecimal characters.");
+                var label = req.Name is { Length: > 0 } n && n.Length <= MaxNameChars ? "upload:" + JobEndpoints.SafeLabel(n) : null;
+                var c = history.Check(name, req.Sha256, label, req.Min, req.Max);
+                return Results.Ok(new
+                {
+                    advisory = false,
+                    duplicate = c.Duplicate == null ? null : ImportRunner.ToMatch(c.Duplicate),
+                    changed = c.Changed == null ? null : ImportRunner.ToMatch(c.Changed),
+                    note = c.Note,
+                });
+            }
+            if (req.Name is not { Length: > 0 } nm || nm.Length > MaxNameChars || req.Size is null or < 0)
+                return Problem(400, "Provide sha256, or name and size.");
+            // Advisory only: the name is the sanitised label (a hint, not proof), the size must also match.
+            var labels = new[] { "upload:" + JobEndpoints.SafeLabel(nm) };
+            var hit = history.FindByNameAndSize(name, labels, req.Size.Value, req.Min, req.Max);
+            var changed = hit == null ? history.FindChangedByName(name, labels) : null;
+            return Results.Ok(new
+            {
+                advisory = true,
+                duplicate = hit == null ? null : ImportRunner.ToMatch(hit),
+                changed = changed == null ? null : ImportRunner.ToMatch(changed),
+                note = (string?)null,
+            });
+        });
+
+        // Records files already imported outside the app (hashed by the caller's own script; never re-read here).
+        api.MapPost("/dbs/{name}/imports/backfill", (string name, List<BackfillEntryRequest>? body, DataRootResolver data, IImportHistory history) =>
+        {
+            data.ResolveExisting(name);                       // 400 bad name / 404 missing
+            var entries = body ?? [];
+            var parsed = new List<BackfillEntry>(entries.Count);
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (e.Name is not { Length: > 0 } nm || nm.Length > MaxNameChars)
+                    return Problem(400, $"entry {i}: name is required and at most {MaxNameChars} characters.");
+                if (!ImportHistory.IsValidSha256(e.Sha256)) return Problem(400, $"entry {i}: sha256 must be 64 hexadecimal characters.");
+                if (e.SizeBytes is null or < 0) return Problem(400, $"entry {i}: sizeBytes must be non-negative.");
+                if (e.ImportedAtUtc is null) return Problem(400, $"entry {i}: importedAtUtc is required.");
+                // Sanitised once, inside ImportHistory.Backfill (SafeLabel: strips any path, keeps the base name).
+                parsed.Add(new BackfillEntry(nm, e.Sha256!, e.SizeBytes.Value, e.ImportedAtUtc.Value));
+            }
+            // ImportHistoryCapExceededException bubbles to the global handler (413); same convention as the
+            // other db exceptions from DataRootResolver/DbManager.
+            var r = history.Backfill(name, parsed);
+            return Results.Ok(new { written = r.Written, skipped = r.Skipped, total = r.Total });
+        });
+
         api.MapPost("/dbs/{name}/export", async (string name, HttpContext ctx, IDbManager dbs) =>
         {
             var (req, error) = await ReadExportRequest(ctx);
@@ -87,7 +151,10 @@ public static class ApiEndpoints
 
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "cancelled";
 
+    private const int MaxNameChars = 256;
     private sealed record CreateDbRequest(string? Name);
+    private sealed record ImportCheckRequest(string? Sha256, string? Name, long? Size, int? Min, int? Max);
+    private sealed record BackfillEntryRequest(string? Name, string? Sha256, long? SizeBytes, DateTimeOffset? ImportedAtUtc);
 
     private static IResult Problem(int status, string detail) =>
         Results.Problem(statusCode: status, detail: detail);

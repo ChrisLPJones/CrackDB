@@ -1,3 +1,5 @@
+using CrackDB.Web.Storage;
+
 namespace CrackDB.Web.Jobs;
 
 public enum JobKind { Import, Compact }
@@ -8,7 +10,8 @@ public sealed record JobSnapshot(
     string Id, string Kind, string Db, string? Source, string Status,
     long LinesRead, long BytesRead, long BytesTotal,
     long EstCountBefore, long EstCountAfter, long EstNewEntries, int Errors,
-    DateTimeOffset QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, string? Error);
+    DateTimeOffset QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, string? Error,
+    string? Note = null, ImportMatch? DuplicateOf = null);
 
 /// <summary>
 /// One queued/running/finished unit of work. Mutated by the worker, read by the endpoints, so
@@ -23,6 +26,10 @@ public sealed class Job
     private int _errors;
     private DateTimeOffset? _started, _ended;
     private string? _error;
+    private string? _note, _sha;
+    private long _size;
+    private ImportMatch? _duplicateOf;
+    private bool _forcedOverride;
 
     public Job(JobKind kind, string dbName, string? label)
     {
@@ -44,6 +51,19 @@ public sealed class Job
     public bool DeleteSourceWhenDone { get; init; }
     public int? Min { get; init; }
     public int? Max { get; init; }
+    /// <summary>The user chose to import even if identical content was already imported.</summary>
+    public bool Force { get; init; }
+
+    /// <summary>SHA-256 (lower hex) of the raw source bytes; known at upload time, or after the pre-pass for server-side files.</summary>
+    public string? ContentSha256 { get { lock (_gate) return _sha; } }
+    public long SizeBytes { get { lock (_gate) return _size; } }
+    public void SetContent(string sha256, long sizeBytes) { lock (_gate) { _sha = sha256; _size = sizeBytes; } }
+
+    /// <summary>Informational message shown with the job (e.g. "changed file"); not an error.</summary>
+    public string? Note { get { lock (_gate) return _note; } set { lock (_gate) _note = value; } }
+    public ImportMatch? DuplicateOf { get { lock (_gate) return _duplicateOf; } set { lock (_gate) _duplicateOf = value; } }
+    /// <summary>True when a duplicate warning was overridden with force.</summary>
+    public bool ForcedOverride { get { lock (_gate) return _forcedOverride; } set { lock (_gate) _forcedOverride = value; } }
 
     /// <summary>Counts a skipped input (e.g. an overlong line) so it shows in the job's error count.</summary>
     public void AddError() { lock (_gate) _errors++; }
@@ -100,6 +120,6 @@ public sealed class Job
             return new JobSnapshot(Id, Kind.ToString().ToLowerInvariant(), DbName, Source,
                 _status.ToString().ToLowerInvariant(), _lines, _bytes, _bytesTotal,
                 _before, _after, Math.Max(0, _after - _before), _errors,
-                QueuedAt, _started, _ended, _error);
+                QueuedAt, _started, _ended, _error, _note, _duplicateOf);
     }
 }
