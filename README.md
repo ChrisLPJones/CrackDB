@@ -2,11 +2,15 @@
 
 HoarderDB is a command-line tool for importing wordlists into a database and exporting new wordlists that match specific requirements, most commonly by password length. It is designed for security testing and password research, where wordlists are often very large (hundreds of gigabytes) and need to be merged, deduplicated, and filtered quickly. Passwords are stored in an embedded database, so there is no server to run and the database is a single portable directory.
 
+![HoarderDB web UI, showing a database's import history, length breakdown and the search panel](docs/images/screenshot.png)
+
 ## Features
 
 - **Import** - Add one or more wordlists in a single command, from files, directories, or wildcard patterns. Duplicates within a file, between files, and against data already stored are removed automatically.
 - **Export by length** - Produce a new wordlist containing every password of an exact length, or within a length range such as 8 to 12 characters.
 - **Exact lookup** - Check whether a specific password already exists in the database, with script-friendly exit codes.
+- **Substring search** (web UI/API) - Find every stored password that contains a given string anywhere, not just an exact match; runs as a background scan on large databases without blocking imports or compaction.
+- **Web UI** - An optional login-protected browser interface for creating/deleting databases, importing, exporting, searching and viewing stats, plus a per-database import history with SHA-256 duplicate detection.
 - **Built for scale** - Tuned for fast, sustained imports of very large wordlists using an embedded RocksDB store with universal compaction, a bulk-load memtable, and a multi-threaded write pipeline.
 
 ## Getting Started
