@@ -619,4 +619,151 @@ public class ImportHistoryTests
         var rec = Rec("j", "completed") with { Min = pmin, Max = pmax };
         Assert.Equal(expected, ImportHistory.Covers(rec, min, max));
     }
+
+    // ---- backfill ----
+
+    private static object Entry(string name, byte[] content, DateTimeOffset? at = null) =>
+        new { name, sha256 = Sha(content), sizeBytes = content.Length, importedAtUtc = at ?? DateTimeOffset.UtcNow };
+
+    [Fact]
+    public async Task Backfill_HappyPath_RecordsBackfilledEntries_UnfilteredAndUnauthoritative()
+    {
+        using var f = new CrackDbWebFactory();
+        var c = await f.NewLoggedInClientAsync();
+        var a = Lines("bfa", 10); var b = Lines("bfb", 20);
+        var at = new DateTimeOffset(2024, 1, 15, 9, 0, 0, TimeSpan.Zero);
+        Assert.Equal(HttpStatusCode.Created, (await c.PostAsJsonAsync("/api/dbs", new { name = "Test_bf1" })).StatusCode);
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_bf1/imports/backfill", new[] { Entry("old-a.txt", a, at), Entry("old-b.txt", b) });
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        var body = await Body(r);
+        Assert.Equal(2, body.GetProperty("written").GetInt32());
+        Assert.Equal(2, body.GetProperty("total").GetInt32());
+        Assert.Empty(body.GetProperty("skipped").EnumerateArray());
+
+        var h = await History(c, "Test_bf1");
+        Assert.Equal(2, h.GetProperty("total").GetInt32());
+        var entries = h.GetProperty("entries").EnumerateArray().ToList();   // newest first
+        Assert.All(entries, e => Assert.Equal("backfilled", e.GetProperty("status").GetString()));
+        Assert.All(entries, e => Assert.Equal(JsonValueKind.Null, e.GetProperty("min").ValueKind));   // unfiltered
+        Assert.All(entries, e => Assert.Equal(JsonValueKind.Null, e.GetProperty("max").ValueKind));
+        var fromA = entries.First(e => e.GetProperty("sha256").GetString() == Sha(a));
+        Assert.Equal("backfill:old-a.txt", fromA.GetProperty("source").GetString());
+        Assert.Equal(at, fromA.GetProperty("importedAt").GetDateTimeOffset());
+
+        // Unfiltered, so even a narrower later real import is seen as already-done (the plan's "unfiltered" decision).
+        var (st, dup, _) = await Upload(c, "Test_bf1", a, min: "2", max: "4");
+        Assert.Equal(HttpStatusCode.Conflict, st);
+        Assert.Equal("backfill:old-a.txt", dup.GetProperty("duplicateOf").GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public async Task Backfill_DuplicateSha256_IsSkippedNotError_AgainstExistingAndWithinTheSameBatch()
+    {
+        using var f = new CrackDbWebFactory();
+        var c = await f.NewLoggedInClientAsync();
+        var data = Lines("bfdup", 15);
+        await Upload(c, "Test_bf2", data, "real.txt");   // already a completed real import; this also creates the db
+
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_bf2/imports/backfill",
+            new[] { Entry("dup1.txt", data), Entry("dup1-again.txt", data), Entry("new.txt", Lines("fresh", 5)) });
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        var body = await Body(r);
+        Assert.Equal(1, body.GetProperty("written").GetInt32());
+        Assert.Equal(3, body.GetProperty("total").GetInt32());
+        var skipped = body.GetProperty("skipped").EnumerateArray().ToList();
+        Assert.Equal(2, skipped.Count);
+        Assert.All(skipped, s => Assert.Equal(Sha(data), s.GetProperty("sha256").GetString()));
+        Assert.All(skipped, s => Assert.Contains("already imported", s.GetProperty("reason").GetString()));
+
+        // Still just the one real import plus the one genuinely new backfilled entry.
+        Assert.Equal(2, (await History(c, "Test_bf2")).GetProperty("total").GetInt32());
+    }
+
+    [Fact]
+    public async Task Backfill_BadSha256_RejectsTheWholeBatch_NamingTheIndex()
+    {
+        using var f = new CrackDbWebFactory();
+        var c = await f.NewLoggedInClientAsync();
+        Assert.Equal(HttpStatusCode.Created, (await c.PostAsJsonAsync("/api/dbs", new { name = "Test_bf3" })).StatusCode);
+var good = Entry("good.txt", Lines("good", 5));
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_bf3/imports/backfill",
+            new[] { good, new { name = "bad.txt", sha256 = "not-hex", sizeBytes = 1, importedAtUtc = DateTimeOffset.UtcNow } });
+        Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+        Assert.Contains("entry 1", (await Body(r)).GetProperty("detail").GetString());
+        Assert.Equal(0, (await History(c, "Test_bf3")).GetProperty("total").GetInt32());   // nothing written from a rejected batch
+    }
+
+    [Fact]
+    public async Task Backfill_BatchExceedingTheCap_IsRejectedWhole_NotTruncated()
+    {
+        using var f = new CrackDbWebFactory();
+        var c = await f.NewLoggedInClientAsync();
+        Assert.Equal(HttpStatusCode.Created, (await c.PostAsJsonAsync("/api/dbs", new { name = "Test_bfcap" })).StatusCode);
+
+        // Pre-fill the sidecar directly (an API round-trip per entry would be far slower than the cap itself).
+        var dir = Path.Combine(f.Root, "Test_bfcap");
+        var sb = new StringBuilder("{\"v\":1,\"entries\":[");
+        for (int i = 0; i < ImportHistory.MaxEntries - 1; i++)
+            sb.Append(i == 0 ? "" : ",").Append($"{{\"id\":\"i{i}\",\"jobId\":\"job{i}\",\"source\":\"s\",\"sha256\":\"{SeqHash(i)}\",\"status\":\"completed\"}}");
+        File.WriteAllText(Path.Combine(dir, ImportHistory.FileName), sb.Append("]}").ToString());
+        Assert.Equal(ImportHistory.MaxEntries - 1, (await History(c, "Test_bfcap")).GetProperty("total").GetInt32());
+
+        var batch = Enumerable.Range(0, 3).Select(i => Entry("cap" + i + ".txt", Lines("cap" + i + "_", 3))).ToArray();
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_bfcap/imports/backfill", batch);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, r.StatusCode);
+        Assert.Equal(ImportHistory.MaxEntries - 1, (await History(c, "Test_bfcap")).GetProperty("total").GetInt32());   // untouched
+
+        // One entry fits exactly at the cap.
+        var r2 = await c.PostAsJsonAsync("/api/dbs/Test_bfcap/imports/backfill", new[] { batch[0] });
+        Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
+        Assert.Equal(ImportHistory.MaxEntries, (await History(c, "Test_bfcap")).GetProperty("total").GetInt32());
+    }
+
+    private static string SeqHash(int i) => Convert.ToHexStringLower(SHA256.HashData(BitConverter.GetBytes(i)));
+
+    [Fact]
+    public async Task Backfill_NameWithPathSeparators_IsStrippedToTheBaseName()
+    {
+        using var f = new CrackDbWebFactory();
+        var c = await f.NewLoggedInClientAsync();
+        var data = Lines("bfpath", 5);
+        Assert.Equal(HttpStatusCode.Created, (await c.PostAsJsonAsync("/api/dbs", new { name = "Test_bf4" })).StatusCode);
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_bf4/imports/backfill",
+            new[] { Entry("../../etc/sneaky.txt", data) });
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        var h = await History(c, "Test_bf4");
+        var source = h.GetProperty("entries")[0].GetProperty("source").GetString()!;
+        Assert.Equal("backfill:sneaky.txt", source);
+        Assert.DoesNotContain("..", source);
+        Assert.DoesNotContain("/", source.Replace("backfill:", ""));
+    }
+
+    [Fact]
+    public async Task Backfill_RequiresAuth_404ForMissingDb()
+    {
+        using var f = new CrackDbWebFactory();
+        var anon = f.NewClient();
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await anon.PostAsJsonAsync($"/api/dbs/{CrackDbWebFactory.DbName}/imports/backfill", new[] { Entry("a.txt", Lines("a", 1)) })).StatusCode);
+
+        var c = await f.NewLoggedInClientAsync();
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await c.PostAsJsonAsync("/api/dbs/Test_nothere/imports/backfill", new[] { Entry("a.txt", Lines("a", 1)) })).StatusCode);
+    }
+
+    [Theory]
+    [InlineData(null, null, true)]    // unbounded backfill covers an unbounded later import: duplicate
+    [InlineData(2, 6, true)]          // ...and a narrower one: still a duplicate
+    [InlineData(null, 3, true)]
+    public void Backfill_IsUnfiltered_SoItCoversAnyLaterRange(int? min, int? max, bool expectDuplicate)
+    {
+        var (root, h, _) = Fixture();
+        try
+        {
+            h.Append("Test_unit", Rec("bf", "backfilled") with { Min = null, Max = null });
+            var c = h.Check("Test_unit", Abc, "upload:a.txt", min, max);
+            Assert.Equal(expectDuplicate, c.Duplicate != null);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
 }

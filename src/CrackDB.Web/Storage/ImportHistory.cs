@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CrackDB.Web.Endpoints;
 
 namespace CrackDB.Web.Storage;
 
@@ -10,9 +11,16 @@ public sealed record ImportRecord(
     string Source,                 // display label only: "upload:<safe name>" or an incoming-relative path; never absolute
     string Sha256,                 // lower hex of the raw bytes (equals sha256sum)
     long SizeBytes, DateTimeOffset ImportedAt, DateTimeOffset? StartedAt,
-    string Status,                 // completed | cancelled | failed
+    string Status,                 // completed | cancelled | failed | backfilled
     int? Min, int? Max,            // null = unbounded
     long LinesRead, int Errors, long EstNewEntries, bool Forced);
+
+/// <summary>One validated row of a backfill batch: a file already imported outside the app, not re-read here.</summary>
+public sealed record BackfillEntry(string Name, string Sha256, long SizeBytes, DateTimeOffset ImportedAtUtc);
+
+public sealed record BackfillSkip(string Sha256, string Reason);
+
+public sealed record BackfillResult(int Written, IReadOnlyList<BackfillSkip> Skipped, int Total);
 
 /// <summary>What a client is told about an earlier import (no hash, no ids beyond the job id).</summary>
 public sealed record ImportMatch(DateTimeOffset ImportedAt, string Source, string JobId, long LinesRead, string Status);
@@ -39,6 +47,14 @@ public interface IImportHistory
     ImportRecord? FindByNameAndSize(string db, IReadOnlyCollection<string> labels, long size, int? min, int? max);
     ImportRecord? FindChangedByName(string db, IReadOnlyCollection<string> labels);
     void Append(string db, ImportRecord record);
+    /// <summary>
+    /// Records files already imported outside the app (not re-read here) as status "backfilled", unfiltered
+    /// (null min/max) so a later real import with a narrower filter is still seen as already-done. An entry
+    /// whose sha256 already has a completed OR backfilled record is skipped, not duplicated. Rejects the whole
+    /// batch (throws <see cref="ImportHistoryCapExceededException"/>, 413) rather than truncating when it would
+    /// push the database past <see cref="MaxEntries"/>.
+    /// </summary>
+    BackfillResult Backfill(string db, IReadOnlyList<BackfillEntry> entries);
 }
 
 /// <summary>
@@ -47,6 +63,8 @@ public interface IImportHistory
 /// the db. The path is the resolver's db directory plus a constant name: no client text reaches a path.
 /// A history write never creates directories (it must not resurrect a deleted db) and refuses a symlinked
 /// sidecar. Read-modify-write is serialised per db; the file is replaced atomically (0600 tmp + rename).
+/// Status is one of completed | cancelled | failed | backfilled (a backfilled record stands for a file
+/// imported outside the app; see <see cref="Backfill"/>).
 /// </summary>
 public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<ImportHistory> log) : IImportHistory
 {
@@ -77,7 +95,8 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
     public ImportCheck Check(string db, string sha256, string? source, int? min, int? max)
     {
         var hash = sha256.ToLowerInvariant();
-        var done = Load(db).Where(r => r.Status == "completed").Reverse().ToList();   // newest first
+        // Backfilled entries count exactly like completed ones here: that is the point of backfill.
+        var done = Load(db).Where(r => r.Status is "completed" or "backfilled").Reverse().ToList();   // newest first
         var same = done.Where(r => r.Sha256 == hash).ToList();
         var dup = same.FirstOrDefault(r => Covers(r, min, max));
         if (dup != null) return new ImportCheck(dup, null, null);
@@ -88,11 +107,11 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
     }
 
     public ImportRecord? FindByNameAndSize(string db, IReadOnlyCollection<string> labels, long size, int? min, int? max) =>
-        Load(db).Where(r => r.Status == "completed" && r.SizeBytes == size && labels.Contains(r.Source) && Covers(r, min, max))
+        Load(db).Where(r => r.Status is "completed" or "backfilled" && r.SizeBytes == size && labels.Contains(r.Source) && Covers(r, min, max))
             .LastOrDefault();
 
     public ImportRecord? FindChangedByName(string db, IReadOnlyCollection<string> labels) =>
-        Load(db).Where(r => r.Status == "completed" && labels.Contains(r.Source)).LastOrDefault();
+        Load(db).Where(r => r.Status is "completed" or "backfilled" && labels.Contains(r.Source)).LastOrDefault();
 
     /// <summary>Prior range covers the new one; null min means 0, null max means unbounded.</summary>
     public static bool Covers(ImportRecord prior, int? min, int? max) =>
@@ -121,6 +140,41 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
                 // Advisory data must never fail an import; DirectoryNotFound (delete racing) lands here too.
                 log.LogWarning("Could not write the import history for {Db} ({Kind})", db, ex.GetType().Name);
             }
+        }
+    }
+
+    public BackfillResult Backfill(string db, IReadOnlyList<BackfillEntry> entries)
+    {
+        var dir = resolver.ResolveExisting(db);                // 400 bad name / 404 missing
+        lock (LockFor(db))
+        {
+            var path = Path.Combine(dir, FileName);
+            if (IsLink(path)) throw new IOException("Import history file is a symlink; refusing to write.");
+            var existing = LoadFile(dir, db);
+            var hashes = new HashSet<string>(
+                existing.Where(r => r.Status is "completed" or "backfilled").Select(r => r.Sha256), StringComparer.Ordinal);
+
+            var skipped = new List<BackfillSkip>();
+            var toAdd = new List<ImportRecord>();
+            foreach (var e in entries)
+            {
+                var hash = e.Sha256.ToLowerInvariant();
+                if (!hashes.Add(hash)) { skipped.Add(new BackfillSkip(hash, "already imported")); continue; }
+                toAdd.Add(new ImportRecord(
+                    Guid.NewGuid().ToString("N"), "backfill-" + Guid.NewGuid().ToString("N"),
+                    "backfill:" + JobEndpoints.SafeLabel(e.Name), hash, e.SizeBytes, e.ImportedAtUtc, null,
+                    "backfilled", null, null, 0, 0, 0, false));
+            }
+
+            // Reject the whole batch rather than silently dropping the oldest entries (unlike the normal
+            // job-queue Append, which must never fail an import): a backfill is a deliberate admin action.
+            if (!DataRootResolver.IsDatabaseDir(dir)) throw new DbNotFoundException("Database not found.");
+            if (existing.Count + toAdd.Count > MaxEntries)
+                throw new ImportHistoryCapExceededException(
+                    $"Backfilling {toAdd.Count} entries would exceed the {MaxEntries}-entry history cap for this database.");
+
+            if (toAdd.Count > 0) WriteAtomic(dir, path, existing.Concat(toAdd).ToList());
+            return new BackfillResult(toAdd.Count, skipped, entries.Count);
         }
     }
 
@@ -162,7 +216,7 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
     }
 
     private static bool Valid(ImportRecord r) =>
-        r != null && r.Sha256 != null && HexRegex().IsMatch(r.Sha256) && r.Status is "completed" or "cancelled" or "failed"
+        r != null && r.Sha256 != null && HexRegex().IsMatch(r.Sha256) && r.Status is "completed" or "cancelled" or "failed" or "backfilled"
         && r.Source != null && r.Id != null && r.JobId != null;
 
     private static void WriteAtomic(string dir, string path, List<ImportRecord> entries)

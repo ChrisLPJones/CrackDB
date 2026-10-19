@@ -190,6 +190,7 @@ internal sealed class ApiExceptionHandler(IProblemDetailsService problems, ILogg
             DbBusyException => (409, "Database is busy (import or compact in progress)."),
             DbAlreadyExistsException => (409, "Database already exists."),
             DbLimitReachedException => (409, "Database limit reached."),
+            ImportHistoryCapExceededException ihc => (413, ihc.Message),
             InvalidSourcePathException => (400, "Invalid source path."),
             SourceNotFoundException => (404, "Source file not found."),
             JobNotFoundException => (404, "Job not found."),

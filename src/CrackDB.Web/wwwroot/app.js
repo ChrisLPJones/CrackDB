@@ -71,7 +71,8 @@ async function loadHistory() {
       const tr = document.createElement('tr');
       const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
       const st = document.createElement('td');
-      const badge = document.createElement('span'); badge.className = 'badge ' + r.status; badge.textContent = r.status;
+      const badge = document.createElement('span'); badge.className = 'badge ' + r.status;
+      badge.textContent = r.status === 'backfilled' ? 'Backfilled' : r.status;
       st.append(badge);
       tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)), st,
         cell(r.sha256.slice(0, 12), r.sha256), cell(fmtRange(r) + (r.forced ? ' (forced)' : '')));
