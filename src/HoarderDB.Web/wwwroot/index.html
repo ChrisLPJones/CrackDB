@@ -49,10 +49,14 @@
 
   <section id="import-panel">
     <h2>Import</h2>
-    <p class="hint">Uploads one or more wordlists from this browser into the currently selected database, one at a time (each file is imported before the next is uploaded). Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
+    <p class="hint">Uploads one or more wordlists from this browser into the currently selected database, one at a time (each file is imported before the next is uploaded). You can pick more files while an upload is running; they are added to the queue for the same database. Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
     <label for="ifile">Wordlist file(s)</label>
     <input id="ifile" type="file" multiple>
     <button id="uploadbtn" class="primary" type="button">Upload and import</button>
+    <div id="queuebox" class="queuebox" hidden>
+      <strong>Waiting in the queue</strong>
+      <ul id="queuelist"></ul>
+    </div>
     <p id="importerror" class="error" role="alert"></p>
 
     <div id="job" class="job" hidden>

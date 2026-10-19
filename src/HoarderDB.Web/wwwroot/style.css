@@ -82,3 +82,8 @@ dialog h2 { margin-top: 0; }
 .searchresults { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
 .searchresults li { padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .searchresults li:last-child { border-bottom: none; }
+
+.queuebox { margin: 8px 0; font-size: .9rem; }
+.queuebox ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.queuebox li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
+.queuebox li span { min-width: 0; overflow-wrap: anywhere; }
