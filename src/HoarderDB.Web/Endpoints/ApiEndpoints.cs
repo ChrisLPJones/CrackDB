@@ -126,7 +126,7 @@ public static class ApiEndpoints
         api.MapGet("/dbs/{name}/imports", (string name, int? limit, int? offset, DataRootResolver data, IImportHistory history) =>
         {
             data.ResolveExisting(name);                       // 400 bad name / 404 missing
-            var page = history.List(name, Math.Clamp(limit ?? 50, 1, 200), Math.Max(0, offset ?? 0));
+            var page = history.List(name, Math.Clamp(limit ?? 50, 1, ImportHistory.MaxEntries), Math.Max(0, offset ?? 0));
             return Results.Ok(new { total = page.Total, entries = page.Entries });
         });
 

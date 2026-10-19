@@ -87,7 +87,7 @@ async function loadHistory() {
   const body = $('histbody');
   if (!wanted) { body.replaceChildren(); show('histinfo', ''); return; }
   try {
-    const h = await api('/api/dbs/' + enc(wanted) + '/imports?limit=50');
+    const h = await api('/api/dbs/' + enc(wanted) + '/imports?limit=5000');
     if (db() !== wanted) return;
     body.replaceChildren(...h.entries.map((r) => {
       const tr = document.createElement('tr');

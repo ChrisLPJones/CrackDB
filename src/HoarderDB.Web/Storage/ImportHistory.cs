@@ -120,7 +120,7 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
     public ImportPage List(string db, int limit, int offset)
     {
         var all = Load(db);                                   // oldest first on disk
-        var page = all.AsEnumerable().Reverse().Skip(Math.Max(0, offset)).Take(Math.Clamp(limit, 0, 200)).ToList();
+        var page = all.AsEnumerable().Reverse().Skip(Math.Max(0, offset)).Take(Math.Clamp(limit, 0, MaxEntries)).ToList();
         return new ImportPage(all.Count, page);
     }
 
