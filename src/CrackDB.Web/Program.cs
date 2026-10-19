@@ -54,6 +54,7 @@ services.TryAddSingleton<IDiskSpace, DriveDiskSpace>();
 services.AddSingleton<IImportHistory, ImportHistory>();
 services.AddSingleton<JobRegistry>();
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
+services.TryAddSingleton<ISearchProgressHook, NoopSearchProgressHook>();
 services.AddSingleton<JobQueue>();
 services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
 // Registered after JobQueue so it stops first on shutdown (reverse order).
@@ -117,12 +118,20 @@ services.AddRateLimiter(o =>
                 QueueLimit = 0,
             });
     });
+    // Search-start rate limit: same fixed-window-per-IP shape as login, so repeated restarts of a
+    // substring scan can't approximate a sustained one (the single-search gate already stops two at
+    // once; this stops churning through the gate). Not user/operator configurable - a fixed, modest
+    // cap is enough since this is a single-user LAN app.
+    o.AddPolicy(ApiEndpoints.SearchLimiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
     o.OnRejected = async (ctx, ct) =>
     {
         ctx.HttpContext.Response.Headers.RetryAfter = "60";
         ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        var title = ctx.HttpContext.Request.Path.StartsWithSegments("/login") ? "Too many login attempts." : "Too many requests.";
         await ctx.HttpContext.Response.WriteAsJsonAsync(
-            new ProblemDetails { Status = 429, Title = "Too many login attempts." }, cancellationToken: ct);
+            new ProblemDetails { Status = 429, Title = title }, cancellationToken: ct);
     };
 });
 

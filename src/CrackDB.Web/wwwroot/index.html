@@ -20,11 +20,10 @@
     <label for="db">Select a database</label>
     <select id="db"></select>
     <p id="dberror" class="error" role="alert"></p>
-    <label for="newdb">Or create a new, empty database</label>
-    <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
-    <button id="createbtn" class="primary" type="button">Create</button>
-    <p id="createerror" class="error" role="alert"></p>
-    <button id="deltoggle" class="danger" type="button">Delete database...</button>
+    <div class="row">
+      <button id="createtoggle" class="primary" type="button">Create</button>
+      <button id="deltoggle" class="danger" type="button">Delete database...</button>
+    </div>
     <div id="delconfirm" hidden>
       <label for="delname">Type the database name to confirm permanent deletion</label>
       <input id="delname" type="text" autocomplete="off" spellcheck="false" maxlength="64">
@@ -33,6 +32,19 @@
     </div>
     <p id="deleteerror" class="error" role="alert"></p>
   </section>
+
+  <dialog id="createdialog">
+    <form id="createform">
+      <h2>Create database</h2>
+      <label for="newdb">New, empty database name</label>
+      <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
+      <p id="createerror" class="error" role="alert"></p>
+      <div class="row">
+        <button id="createbtn" class="primary" type="submit">Create</button>
+        <button id="createcancel" type="button">Cancel</button>
+      </div>
+    </form>
+  </dialog>
 
   <section id="import-panel">
     <h2>Import</h2>
@@ -53,17 +65,23 @@
     </div>
   </section>
 
-  <section id="history-panel">
-    <details>
-      <summary><h2>Import history</h2></summary>
-      <p id="histinfo" class="hint"></p>
-      <div class="tablewrap">
-        <table id="hist">
-          <thead><tr><th>Date</th><th>Name</th><th>Size</th><th>Lines read</th><th>Status</th><th>Hash</th><th>Range</th></tr></thead>
-          <tbody id="histbody"></tbody>
-        </table>
-      </div>
-    </details>
+  <section id="search-panel">
+    <h2>Search</h2>
+    <p class="hint">Finds every stored password that contains the text anywhere (case-insensitive), not just an exact match. This scans the database in the background and can take a while on a large one; only one search runs at a time, server-wide.</p>
+    <label for="squery">Password or substring (at least 4 characters)</label>
+    <input id="squery" type="text" autocomplete="off" spellcheck="false" maxlength="256">
+    <button id="searchbtn" class="primary" type="button">Search</button>
+    <p id="searcherror" class="error" role="alert"></p>
+
+    <div id="searchjob" class="job" hidden>
+      <div class="jobhead"><strong id="searchtitle"></strong><span id="searchstatus" class="badge"></span></div>
+      <p id="searchexact" class="hint"></p>
+      <progress id="searchbar"></progress>
+      <dl id="searchstats"></dl>
+      <p id="searchjoberror" class="error" role="alert"></p>
+      <button id="searchcancel" type="button">Cancel</button>
+      <ul id="searchresults" class="result searchresults"></ul>
+    </div>
   </section>
 
   <section>
@@ -75,6 +93,22 @@
       </div>
       <button class="primary" type="submit">Download .txt</button>
     </form>
+  </section>
+
+  <section id="history-panel">
+    <details>
+      <summary>
+        <h2>Import history</h2>
+        <span class="disclosure-arrow" aria-hidden="true"></span>
+      </summary>
+      <p id="histinfo" class="hint"></p>
+      <div class="tablewrap">
+        <table id="hist">
+          <thead><tr><th>Date</th><th>Name</th><th>Size</th><th>Lines read</th></tr></thead>
+          <tbody id="histbody"></tbody>
+        </table>
+      </div>
+    </details>
   </section>
 
   <section>

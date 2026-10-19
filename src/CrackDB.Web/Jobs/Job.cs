@@ -2,7 +2,7 @@ using CrackDB.Web.Storage;
 
 namespace CrackDB.Web.Jobs;
 
-public enum JobKind { Import, Compact }
+public enum JobKind { Import, Compact, Search }
 public enum JobStatus { Queued, Running, Completed, Failed, Cancelled }
 
 /// <summary>JSON shape of a job (what SSE frames and the job endpoints return).</summary>
@@ -11,7 +11,10 @@ public sealed record JobSnapshot(
     long LinesRead, long BytesRead, long BytesTotal,
     long EstCountBefore, long EstCountAfter, long EstNewEntries, int Errors,
     DateTimeOffset QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, string? Error,
-    string? Note = null, ImportMatch? DuplicateOf = null);
+    string? Note = null, ImportMatch? DuplicateOf = null,
+    // Search-only fields (unused/zero for Import/Compact). Matches is capped server-side
+    // (see SearchRunner.ResultCap) so the SSE frame never grows unboundedly.
+    long ScannedCount = 0, long MatchedCount = 0, IReadOnlyList<string>? Matches = null, bool Capped = false);
 
 /// <summary>
 /// One queued/running/finished unit of work. Mutated by the worker, read by the endpoints, so
@@ -30,6 +33,9 @@ public sealed class Job
     private long _size;
     private ImportMatch? _duplicateOf;
     private bool _forcedOverride;
+    private long _scanned, _matched;
+    private List<string>? _matches;
+    private bool _capped;
 
     public Job(JobKind kind, string dbName, string? label)
     {
@@ -102,6 +108,19 @@ public sealed class Job
     public void SetProgress(long lines, long bytes) { lock (_gate) { _lines = lines; _bytes = bytes; } }
     public void SetAfter(long estAfter) { lock (_gate) _after = estAfter; }
 
+    /// <summary>Search progress: how many keys have been scanned so far (counter, not a percentage).</summary>
+    public void SetScanned(long scanned) { lock (_gate) _scanned = scanned; }
+
+    /// <summary>
+    /// Replaces the search job's result set. <paramref name="matches"/> is already capped by the
+    /// caller (<see cref="SearchRunner"/>'s ResultCap); this never grows it further, so the SSE frame
+    /// stays bounded no matter how long the scan runs.
+    /// </summary>
+    public void SetMatches(List<string> matches, long matchedCount, bool capped)
+    {
+        lock (_gate) { _matches = matches; _matched = matchedCount; _capped = capped; }
+    }
+
     public void Finish(JobStatus terminal, string? error = null)
     {
         lock (_gate)
@@ -120,6 +139,7 @@ public sealed class Job
             return new JobSnapshot(Id, Kind.ToString().ToLowerInvariant(), DbName, Source,
                 _status.ToString().ToLowerInvariant(), _lines, _bytes, _bytesTotal,
                 _before, _after, Math.Max(0, _after - _before), _errors,
-                QueuedAt, _started, _ended, _error, _note, _duplicateOf);
+                QueuedAt, _started, _ended, _error, _note, _duplicateOf,
+                _scanned, _matched, _matches, _capped);
     }
 }

@@ -58,7 +58,6 @@ $('db').addEventListener('change', onDbChanged);
 // ---- import history (advisory record of past imports; all values are untrusted text) ----
 
 const fmtDate = (s) => (s ? new Date(s).toLocaleString() : '-');
-const fmtRange = (r) => (r.min == null && r.max == null ? 'all' : (r.min == null ? 0 : r.min) + '-' + (r.max == null ? 'max' : r.max));
 
 async function loadHistory() {
   const wanted = db();
@@ -70,12 +69,7 @@ async function loadHistory() {
     body.replaceChildren(...h.entries.map((r) => {
       const tr = document.createElement('tr');
       const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
-      const st = document.createElement('td');
-      const badge = document.createElement('span'); badge.className = 'badge ' + r.status;
-      badge.textContent = r.status === 'backfilled' ? 'Backfilled' : r.status;
-      st.append(badge);
-      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)), st,
-        cell(r.sha256.slice(0, 12), r.sha256), cell(fmtRange(r) + (r.forced ? ' (forced)' : '')));
+      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
       return tr;
     }));
     show('histinfo', h.total ? (h.total > h.entries.length ? 'Showing the latest ' + h.entries.length + ' of ' + h.total + '. ' : '') +
@@ -92,14 +86,16 @@ $('statsbtn').addEventListener('click', async () => {
     const out = $('stats');
     out.textContent = '';
     if (s.lengths) {
-      const t = document.createElement('table');
-      t.append(...s.lengths.map((l) => {
-        const tr = document.createElement('tr');
-        const a = document.createElement('td'); a.textContent = 'length ' + l.length;
-        const b = document.createElement('td'); b.textContent = fmt(l.count);
-        tr.append(a, b); return tr;
+      const grid = document.createElement('div');
+      grid.className = 'lengthgrid';
+      grid.append(...s.lengths.map((l) => {
+        const cell = document.createElement('div');
+        cell.className = 'lengthcell';
+        const a = document.createElement('span'); a.className = 'muted'; a.textContent = 'length ' + l.length + ': ';
+        const b = document.createElement('span'); b.textContent = fmt(l.count);
+        cell.append(a, b); return cell;
       }));
-      out.append(t);
+      out.append(grid);
     }
   } catch (e) { fail('stats', e); }
 });
@@ -119,13 +115,23 @@ const post = (path, body) => api(path, {
   body: JSON.stringify(body),
 });
 
-$('createbtn').addEventListener('click', async () => {
+$('createtoggle').addEventListener('click', () => {
+  show('createerror', '');
+  $('newdb').value = '';
+  $('createdialog').showModal();
+  $('newdb').focus();
+});
+$('createcancel').addEventListener('click', () => { $('createdialog').close(); });
+
+$('createform').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
   const name = $('newdb').value.trim();
   if (!name) { show('createerror', 'Enter a database name.'); return; }
   try {
     await post('/api/dbs', { name });
     show('createerror', '');
     $('newdb').value = '';
+    $('createdialog').close();
     await loadDbs(name);
   } catch (e) { fail('createerror', e); }
 });
@@ -410,6 +416,75 @@ $('jobcancel').addEventListener('click', async () => {
     if (active) { renderJob(active); track(active.id); }
   } catch (e) { /* the panel just starts idle */ }
 })();
+
+// ---- "contains" search: exact match answered inline; substring match is a background job ----
+
+const SEARCH_MIN_QUERY_LENGTH = 4;   // mirrors SearchRunner.MinQueryLength; the server enforces this regardless
+let searchEvents = null;
+let currentSearchJob = null;
+let currentSearchId = null;   // known as soon as the start request returns, even before the first SSE frame
+
+function closeSearchEvents() { if (searchEvents) { searchEvents.close(); searchEvents = null; } }
+
+function renderSearchJob(j) {
+  currentSearchJob = j;
+  currentSearchId = j.id;
+  $('searchjob').hidden = false;
+  $('searchtitle').textContent = 'Searching ' + j.db + ' for "' + j.source + '"';
+  const st = $('searchstatus'); st.textContent = j.status; st.className = 'badge ' + j.status;
+  const bar = $('searchbar');
+  const done = TERMINAL.includes(j.status);
+  if (done) { bar.max = 100; bar.value = 100; } else bar.removeAttribute('value');   // indeterminate: no percentage, just a counter below
+  $('searchstats').replaceChildren(
+    ...[['Scanned', fmt(j.scannedCount) + ' entries'], ['Found', fmt(j.matchedCount) + (j.capped ? ' (stopped at the cap)' : '')], ['Elapsed', fmtElapsed(j)]]
+      .flatMap(([k, v]) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd]; }));
+  show('searchjoberror', j.error || '');
+  const list = $('searchresults');
+  list.replaceChildren(...(j.matches || []).map((w) => { const li = document.createElement('li'); li.textContent = w; return li; }));   // textContent only: never innerHTML
+  if (j.capped) {
+    const li = document.createElement('li');
+    li.textContent = 'Showing the first ' + j.matches.length + ' of at least ' + fmt(j.matchedCount) + ' matches.';
+    list.append(li);
+  }
+  $('searchcancel').hidden = done;
+  if (done) closeSearchEvents();
+}
+
+function trackSearch(id) {
+  closeSearchEvents();
+  const es = new EventSource('/api/jobs/' + enc(id) + '/events');
+  searchEvents = es;
+  es.onmessage = (m) => renderSearchJob(JSON.parse(m.data));
+  es.onerror = async () => {
+    if (es.readyState !== EventSource.CLOSED) return;
+    try {
+      const j = await api('/api/jobs/' + enc(id));
+      renderSearchJob(j);
+      if (!TERMINAL.includes(j.status)) setTimeout(() => trackSearch(id), 2000);
+    } catch (e) { fail('searchjoberror', e); closeSearchEvents(); }
+  };
+}
+
+$('searchbtn').addEventListener('click', async () => {
+  const dbName = db();
+  const query = $('squery').value;
+  show('searcherror', '');
+  if (!dbName) { show('searcherror', 'Select a database first.'); return; }
+  if (query.length < SEARCH_MIN_QUERY_LENGTH) { show('searcherror', 'Enter at least ' + SEARCH_MIN_QUERY_LENGTH + ' characters.'); return; }
+  try {
+    const res = await post('/api/dbs/' + enc(dbName) + '/search', { query });
+    currentSearchId = res.id;
+    $('searchjob').hidden = false;
+    show('searchexact', 'Exact match: ' + (res.exactFound ? 'found.' : 'not found.') + ' Scanning the rest of the database for "' + res.query + '" in the background...');
+    trackSearch(res.id);
+  } catch (e) { fail('searcherror', e); }
+});
+
+$('searchcancel').addEventListener('click', async () => {
+  if (!currentSearchId) return;
+  try { renderSearchJob(await api('/api/jobs/' + enc(currentSearchId) + '/cancel', { method: 'POST' })); }
+  catch (e) { fail('searchjoberror', e); }
+});
 
 $('logout').addEventListener('click', async () => {
   await fetch('/logout', { method: 'POST', credentials: 'same-origin' });

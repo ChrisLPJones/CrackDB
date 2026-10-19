@@ -170,4 +170,91 @@ public class WordlistDatabaseTests
         Assert.Throws<InvalidOperationException>(() => TempDb.EnsureThrowaway(Path.Combine(Path.GetTempPath(), "realdb")));
         Assert.Throws<InvalidOperationException>(() => TempDb.EnsureThrowaway("/data/Test_x"));
     }
+
+    // ---- Scan (substring-search support) ----
+
+    private static readonly string[] SearchWords =
+        { "password1", "password123", "xpassword1", "PASSWORD1", "nomatch", "short", "pw" };
+
+    private static List<string> ContainsSubstring(IEnumerable<string> words, string query, bool ignoreCase) =>
+        words.Where(w => w.Contains(query, ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)).ToList();
+
+    [Fact]
+    public void Scan_NoResume_ReturnsEverythingInLengthOrder_LikeRange()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        Assert.Equal(db.Range(null, null, null).ToArray(), db.Scan(null, null, null).ToArray());
+    }
+
+    [Fact]
+    public void Scan_SubstringMatch_StartMiddleEnd_CaseInsensitive()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        // query length narrows the scan the same way the search endpoint will: min = query length.
+        var all = db.Scan(min: "password1".Length, max: null, resumeAfterWord: null).ToList();
+        var matches = ContainsSubstring(all, "password1", ignoreCase: true);
+        Assert.Equal(
+            new[] { "password1", "password123", "xpassword1", "PASSWORD1" }.OrderBy(w => w, StringComparer.Ordinal),
+            matches.OrderBy(w => w, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Scan_SubstringMatch_CaseSensitive_ExcludesDifferentCasing()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        var all = db.Scan(min: "password1".Length, max: null, resumeAfterWord: null).ToList();
+        var matches = ContainsSubstring(all, "password1", ignoreCase: false);
+        Assert.DoesNotContain("PASSWORD1", matches);
+        Assert.Contains("password1", matches);
+        Assert.Contains("password123", matches);
+        Assert.Contains("xpassword1", matches);
+    }
+
+    [Fact]
+    public void Scan_SubstringMatch_NegativeQuery_FindsNothing()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        var all = db.Scan(min: "zzzznotfound".Length, max: null, resumeAfterWord: null).ToList();
+        Assert.Empty(ContainsSubstring(all, "zzzznotfound", ignoreCase: true));
+    }
+
+    [Fact]
+    public void Scan_LengthNarrowing_SkipsEntriesShorterThanTheQuery()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        // "pw" (length 2) is shorter than the query length (9); it must never be scanned or returned,
+        // even though a naive substring check on it would just fail anyway - the point is Seek skips it.
+        var scanned = db.Scan(min: 9, max: null, resumeAfterWord: null).ToList();
+        Assert.DoesNotContain("pw", scanned);
+        Assert.DoesNotContain("short", scanned);
+        Assert.All(scanned, w => Assert.True(w.Length >= 9));
+    }
+
+    [Fact]
+    public void Scan_Resume_ContinuesAfterTheGivenWord_NoDuplicatesNoGaps()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        var full = db.Scan(null, null, null).ToList();
+        Assert.True(full.Count > 2);
+        var cursor = full[1];
+        var resumed = db.Scan(null, null, cursor).ToList();
+        Assert.Equal(full.Skip(2), resumed);
+    }
+
+    [Fact]
+    public void Scan_MaxBound_StopsAtFirstLongerLength()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t, SearchWords);
+        var scanned = db.Scan(min: null, max: 5, resumeAfterWord: null).ToList();
+        Assert.All(scanned, w => Assert.True(w.Length <= 5));
+        Assert.Contains("short", scanned);
+        Assert.Contains("pw", scanned);
+    }
 }

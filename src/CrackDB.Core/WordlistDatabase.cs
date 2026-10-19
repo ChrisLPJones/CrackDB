@@ -271,6 +271,42 @@ public sealed class WordlistDatabase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Resumable, length-bounded scan: streams every stored password whose length is in [min, max],
+    /// in the same length-then-password order as <see cref="Range"/>. Pass <paramref name="resumeAfterWord"/>
+    /// (the last word returned by a previous call) to continue right after it instead of restarting
+    /// from the beginning - lets a caller release the read lease between chunks and re-seek without
+    /// re-scanning what it already consumed. There is no delete path in this app, so a resume word
+    /// that no longer exists is not a real case; the seek still lands at the next key >= that key,
+    /// which is correct either way. Either bound may be null (open-ended).
+    /// </summary>
+    public IEnumerable<string> Scan(int? min, int? max, string? resumeAfterWord)
+    {
+        int lo = min ?? 0;
+        var readOpts = new ReadOptions();
+        using var it = _db.NewIterator(readOptions: readOpts);
+        if (resumeAfterWord != null)
+        {
+            // Resume strictly after the given word: seek to its key, then step once past it (or past
+            // whatever sorts just after it, if the exact key is gone - no deletes in this app, so that
+            // never actually happens, but Next() is still the correct, safe thing to do either way).
+            it.Seek(MakeKey(resumeAfterWord));
+            if (it.Valid()) it.Next();
+        }
+        else
+        {
+            it.Seek(LengthPrefix(lo));
+        }
+        for (; it.Valid(); it.Next())
+        {
+            var key = it.Key();
+            int len = BinaryPrimitives.ReadInt32BigEndian(key);
+            if (len < lo) continue;                              // only reachable via a resume seek landing short
+            if (max.HasValue && len > max.Value) yield break;    // sorted: nothing longer follows in-range
+            yield return _enc.GetString(key, 4, key.Length - 4);
+        }
+    }
+
     /// <summary>Exact count of passwords with length in [min, max] (full range scan).</summary>
     public long CountRange(int? min, int? max)
     {

@@ -44,11 +44,16 @@ public sealed class JobQueue(
         }
     }
 
-    /// <summary>Request cancellation. Imports stop cooperatively; a running compact cannot be cancelled.</summary>
+    /// <summary>
+    /// Request cancellation. Imports and searches stop cooperatively (checked every chunk); a running
+    /// compact cannot be cancelled. A search job is never queued through this worker (see
+    /// <see cref="SearchRunner"/>), but it shares this one cancel endpoint/route, so it is handled
+    /// here too - Cts.Cancel() is all that's needed, SearchRunner.ExecuteAsync does its own cleanup.
+    /// </summary>
     public JobSnapshot Cancel(Job job)
     {
         if (job.TryCancelQueued()) Cleanup(job);
-        else if (job.Kind == JobKind.Import && !job.IsTerminal)
+        else if (job.Kind is JobKind.Import or JobKind.Search && !job.IsTerminal)
         {
             try { job.Cts.Cancel(); } catch (ObjectDisposedException) { /* finished in the meantime */ }
         }
