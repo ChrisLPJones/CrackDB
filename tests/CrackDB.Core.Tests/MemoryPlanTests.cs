@@ -62,6 +62,46 @@ public class MemoryPlanTests
     [Fact]
     public void DefaultBudget_AtLeast256Mb() => Assert.True(MemoryPlan.DefaultBudgetBytes() >= 256 * MiB);
 
+    // Cross-check coverage for the shared SystemMemory primitive (fix for the budget/headroom
+    // mismatch bug): MemoryPlan.DefaultBudgetBytes() must size itself off the same cross-checked
+    // "available" number HeadroomGuard uses, not off the GC's raw total-memory reading alone.
+
+    [Fact]
+    public void DefaultBudget_UsesLowerOfDivergentGcAndProcReadings()
+    {
+        var savedGc = SystemMemory.GcReader;
+        var savedProc = SystemMemory.ProcMeminfoReader;
+        try
+        {
+            // Simulate the reproduced bug: GC reports a huge host-level reading (e.g. 31.2 GiB on an
+            // unconstrained cgroup) while the real, cross-checked figure (/proc/meminfo) is far smaller.
+            SystemMemory.GcReader = () => 32L * GiB;
+            SystemMemory.ProcMeminfoReader = () => 6L * GiB;
+
+            long budget = MemoryPlan.DefaultBudgetBytes();
+
+            // Must be 50% of the LOWER reading (6 GiB), never 50% of the inflated GC-only reading.
+            Assert.Equal(3L * GiB, budget);
+        }
+        finally
+        {
+            SystemMemory.GcReader = savedGc;
+            SystemMemory.ProcMeminfoReader = savedProc;
+        }
+    }
+
+    [Fact]
+    public void DefaultBudget_FallsBackTo256MbFloor_WhenReadingAmbiguous()
+    {
+        var saved = SystemMemory.AvailableBytesReader;
+        try
+        {
+            SystemMemory.AvailableBytesReader = () => null;
+            Assert.Equal(256 * MiB, MemoryPlan.DefaultBudgetBytes());
+        }
+        finally { SystemMemory.AvailableBytesReader = saved; }
+    }
+
     private static IEnumerable<string> LongLines(int count, int len)
     {
         for (int i = 0; i < count; i++)
