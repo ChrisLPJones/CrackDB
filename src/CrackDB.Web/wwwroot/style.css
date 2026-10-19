@@ -51,3 +51,10 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 .banner { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border);
   border-radius: 8px; padding: 10px 14px; margin: 12px 0; overflow-wrap: anywhere; }
+
+.tablewrap { overflow-x: auto; }
+#hist { font-size: .85rem; width: 100%; }
+#hist th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+#hist td { overflow-wrap: anywhere; vertical-align: top; padding-bottom: 4px; }
+.badge.completed { color: var(--accent); border-color: var(--accent); }
+.badge.cancelled { color: var(--muted); }

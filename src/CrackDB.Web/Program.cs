@@ -51,6 +51,7 @@ services.AddHostedService(sp => sp.GetRequiredService<DbManager>());   // StopAs
 // only then does DbManager close the handles.
 services.AddSingleton<IncomingPathResolver>();
 services.TryAddSingleton<IDiskSpace, DriveDiskSpace>();
+services.AddSingleton<IImportHistory, ImportHistory>();
 services.AddSingleton<JobRegistry>();
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
 services.AddSingleton<JobQueue>();

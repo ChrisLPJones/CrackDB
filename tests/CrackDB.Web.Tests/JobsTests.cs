@@ -109,7 +109,7 @@ public class JobsTests
         var hook = new BlockingHook();
         using var f = new CrackDbWebFactory(1000, null, null, hook);
         var c = await f.NewLoggedInClientAsync();
-        WriteFile(f, "a.txt", 3000); WriteFile(f, "b.txt", 3000);
+        WriteFile(f, "a.txt", 3000); WriteFile(f, "b.txt", 3001);   // differs from a.txt: identical content would be skipped as already imported
         var first = await Import(c, "Test_drain", "a.txt");      // hook not armed: creates the db
         await WaitStatus(c, first, "completed");
 
@@ -148,7 +148,7 @@ public class JobsTests
         var c = await f.NewLoggedInClientAsync();
         WriteFile(f, "a.txt", 3000);
         await WaitStatus(c, await Import(c, "Test_busy", "a.txt"), "completed");
-        WriteFile(f, "b.txt", 3000);
+        WriteFile(f, "b.txt", 3001);   // differs from a.txt (identical content would be skipped)
         hook.Arm();
         var second = await Import(c, "Test_busy", "b.txt");
         Assert.True(hook.Reached.Wait(TimeSpan.FromSeconds(30)));   // import is mid-write
@@ -456,7 +456,7 @@ public class JobsTests
         hook.Arm();
         var a = await Import(c, "Test_a", "a.txt");
         Assert.True(hook.Reached.Wait(TimeSpan.FromSeconds(30)));
-        var b = await Import(c, "Test_fail", "gone.txt");
+        var b = await Import(c, CrackDbWebFactory.DbName, "gone.txt");   // existing db: a failure before the write window creates nothing
         File.Delete(Path.Combine(f.Incoming, "gone.txt"));      // vanishes while queued
         hook.Disarm();
         await WaitStatus(c, a, "completed");
@@ -465,6 +465,6 @@ public class JobsTests
         Assert.DoesNotContain(f.Incoming, raw);
         Assert.False(string.IsNullOrEmpty(j.GetProperty("error").GetString()));
         // the db is still readable (reopened Read) after a failed import
-        Assert.Equal(HttpStatusCode.OK, (await c.GetAsync("/api/dbs/Test_fail/count")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await c.GetAsync("/api/dbs/" + CrackDbWebFactory.DbName + "/count")).StatusCode);
     }
 }

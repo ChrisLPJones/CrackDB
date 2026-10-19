@@ -47,8 +47,20 @@
       <p id="jobwait" class="hint"></p>
       <progress id="jobbar" max="100" value="0"></progress>
       <dl id="jobstats"></dl>
+      <p id="jobnote" class="hint"></p>
       <p id="joberror" class="error" role="alert"></p>
       <button id="jobcancel" type="button">Cancel</button>
+    </div>
+  </section>
+
+  <section id="history-panel">
+    <h2>Import history</h2>
+    <p id="histinfo" class="hint"></p>
+    <div class="tablewrap">
+      <table id="hist">
+        <thead><tr><th>Date</th><th>Name</th><th>Size</th><th>Lines read</th><th>Status</th><th>Hash</th><th>Range</th></tr></thead>
+        <tbody id="histbody"></tbody>
+      </table>
     </div>
   </section>
 

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CrackDB.Web.Jobs;
@@ -20,7 +21,7 @@ public static class JobEndpoints
     private static readonly TimeSpan SsePoll = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SseKeepalive = TimeSpan.FromSeconds(15);
 
-    public sealed record ImportRequest(string? Db, string? Source, int? Min, int? Max);
+    public sealed record ImportRequest(string? Db, string? Source, int? Min, int? Max, bool? Force = null);
     public sealed record CompactRequest(string? Db);
 
     public static void MapJobs(this IEndpointRouteBuilder app)
@@ -36,7 +37,7 @@ public static class JobEndpoints
             if (Validate(req.Min, req.Max) is { } bad) return bad;
             var job = new Job(JobKind.Import, req.Db!, req.Source)
             {
-                SourcePath = path, Min = req.Min, Max = req.Max,
+                SourcePath = path, Min = req.Min, Max = req.Max, Force = req.Force == true,
             };
             queue.Enqueue(job);
             return Accepted(job);
@@ -119,7 +120,8 @@ public static class JobEndpoints
 
     // multipart/form-data, streamed. Text fields (db, min, max) must precede the single "file" part.
     private static async Task<IResult> UploadAsync(HttpContext ctx, DataRootResolver data,
-        IncomingPathResolver incoming, JobQueue queue, IOptions<UploadOptions> upload, IDiskSpace disk)
+        IncomingPathResolver incoming, JobQueue queue, IOptions<UploadOptions> upload, IDiskSpace disk,
+        IImportHistory history)
     {
         var max = upload.Value.MaxBytes;
         var unlimited = max <= 0;                                  // 0 / unset: no byte cap
@@ -147,7 +149,7 @@ public static class JobEndpoints
             return Results.Problem(statusCode: 409, detail: "Another upload is already in progress.");
         try
         {
-            string? db = null; int? min = null, maxLen = null;
+            string? db = null; int? min = null, maxLen = null; bool force = false;
             var reader = new MultipartReader(boundary, ctx.Request.Body);
             string? temp = null;
             try
@@ -170,6 +172,8 @@ public static class JobEndpoints
                         // Server-generated name; the client filename is only ever a display label.
                         temp = Path.Combine(incoming.UploadDir, Guid.NewGuid().ToString("N") + ".part");
                         long total = 0, sinceCheck = 0;
+                        // Hashed while streaming to disk: no extra pass. Raw bytes, so it equals sha256sum.
+                        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                         var opts = new FileStreamOptions
                         {
                             Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None,
@@ -185,6 +189,7 @@ public static class JobEndpoints
                             {
                                 total += n;
                                 if (!unlimited && total > max) throw new UploadTooLargeException("Upload exceeds the size limit.");
+                                sha.AppendData(buf, 0, n);
                                 await fs.WriteAsync(buf.AsMemory(0, n), ctx.RequestAborted);
                                 // Unbounded stream: ContentLength may be absent or understated, so keep re-checking
                                 // the free space and abort (the partial file is deleted below) rather than fill the disk.
@@ -198,13 +203,30 @@ public static class JobEndpoints
                         }
                         if (total == 0) return Results.Problem(statusCode: 400, detail: "The uploaded file is empty.");
 
+                        var hex = Convert.ToHexStringLower(sha.GetHashAndReset());
+                        // Early answer so the client learns about a duplicate from the upload itself. The queue worker
+                        // re-checks at job start (two queued jobs with the same content must not both import).
+                        var check = history.Check(db!, hex, label, min, maxLen);
+                        if (check.Duplicate is { } dup && !force)
+                            return Results.Problem(statusCode: 409, title: "Already imported.",
+                                detail: $"Identical content was already imported on {dup.ImportedAt.UtcDateTime:yyyy-MM-dd}.",
+                                extensions: new Dictionary<string, object?>
+                                {
+                                    ["code"] = "already_imported",
+                                    ["duplicateOf"] = ImportRunner.ToMatch(dup),
+                                });
+
                         var job = new Job(JobKind.Import, db!, label)
                         {
-                            SourcePath = temp, DeleteSourceWhenDone = true, Min = min, Max = maxLen,
+                            SourcePath = temp, DeleteSourceWhenDone = true, Min = min, Max = maxLen, Force = force,
+                            Note = check.Note,
                         };
+                        job.SetContent(hex, total);
                         queue.Enqueue(job);                            // from here the job owns (and deletes) the file
                         temp = null;
-                        return Accepted(job);
+                        var prior = check.Duplicate ?? check.Changed ?? check.Narrower;
+                        return Results.Json(new { id = job.Id, note = check.Note, previous = prior == null ? null : ImportRunner.ToMatch(prior) },
+                            Json, statusCode: StatusCodes.Status202Accepted);
                     }
 
                     var name = HeaderUtilities.RemoveQuotes(cd.Name).Value;
@@ -214,6 +236,7 @@ public static class JobEndpoints
                         case "db": db = value; break;
                         case "min": min = ParseInt(value); break;
                         case "max": maxLen = ParseInt(value); break;
+                        case "force": force = value.Trim().Equals("true", StringComparison.OrdinalIgnoreCase) || value.Trim() == "1"; break;
                         default: return Results.Problem(statusCode: 400, detail: "Unexpected upload field.");
                     }
                 }
