@@ -17,12 +17,14 @@ main { max-width: 760px; margin: 0 auto; padding: 16px; }
 header.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 h1 { font-size: 1.4rem; margin: 8px 0; }
 h2 { font-size: 1.1rem; margin: 0 0 8px; }
-#history-panel summary { cursor: pointer; list-style: none; display: flex; flex-direction: row; align-items: center; gap: 6px; }
-#history-panel summary h2 { margin: 0; }
-#history-panel summary::-webkit-details-marker { display: none; }
-#history-panel .disclosure-arrow { display: block; font-size: 0.75em; color: var(--muted); transition: transform 0.15s; }
-#history-panel .disclosure-arrow::before { content: '\25B6'; }
-#history-panel details[open] .disclosure-arrow { transform: rotate(90deg); }
+.collapsible summary { cursor: pointer; list-style: none; display: flex; flex-direction: row; align-items: center; gap: 6px; }
+.collapsible summary h2, .collapsible summary h3 { margin: 0; }
+.collapsible h3 { font-size: 1rem; }
+.collapsible summary::-webkit-details-marker { display: none; }
+.collapsible .disclosure-arrow { display: block; font-size: 0.75em; color: var(--muted); transition: transform 0.15s; }
+.collapsible .disclosure-arrow::before { content: '\25B6'; }
+.collapsible details[open] > summary .disclosure-arrow { transform: rotate(90deg); }
+details.subpanel { margin-top: 12px; }
 section, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 16px; margin: 16px 0; }
 label { display: block; font-size: .9rem; color: var(--muted); margin: 8px 0 2px; }
@@ -82,3 +84,8 @@ dialog h2 { margin-top: 0; }
 .searchresults { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
 .searchresults li { padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .searchresults li:last-child { border-bottom: none; }
+
+.queuebox { margin: 8px 0; font-size: .9rem; }
+.queuebox ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.queuebox li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
+.queuebox li span { min-width: 0; overflow-wrap: anywhere; }

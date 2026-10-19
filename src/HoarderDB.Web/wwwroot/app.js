@@ -42,7 +42,7 @@ async function loadSize() {
   const wanted = db();
   try {
     const s = await api('/api/dbs/' + enc(wanted) + '/stats?full=false');
-    if (db() === wanted) show('size', '~' + fmt(s.estimatedCount) + ' passwords (approximate)');
+    if (db() === wanted) show('size', fmt(s.estimatedCount) + ' passwords (approximate)');
   } catch (e) { if (db() === wanted) fail('size', e); }
 }
 
@@ -111,7 +111,7 @@ $('statsbtn').addEventListener('click', async () => {
 const TERMINAL = ['completed', 'failed', 'cancelled'];
 let events = null;
 let currentJob = null;
-let batch = null;       // { index, total, cancelled, xhr } while a multi-file upload runs
+let batch = null;       // { db, queue, index, total, cancelled, xhr } while a multi-file upload runs
 let jobWaiter = null;   // { id, resolve } - lets the batch loop await a job's terminal state
 const batchSuffix = () => (batch ? ' (file ' + batch.index + ' of ' + batch.total + ')' : '');
 
@@ -254,7 +254,8 @@ function renderJob(j) {
 }
 
 function closeEvents() { if (events) { events.close(); events = null; } }
-function setBusy(b) { $('uploadbtn').disabled = b; }
+// During a batch the Upload button stays usable: it appends more files to the queue.
+function setBusy(b) { $('uploadbtn').disabled = b && !batch; }
 
 function track(id) {
   closeEvents();
@@ -327,7 +328,7 @@ function renderUpload(name, loaded, total) {
 // Files are sent one at a time and each import must finish before the next upload starts, so the
 // server's single-upload gate never answers 409 and only one job is ever active.
 async function runBatch(dbName, files) {
-  batch = { index: 0, total: files.length, cancelled: false, xhr: null };
+  batch = { db: dbName, queue: files.slice(), index: 0, total: files.length, cancelled: false, xhr: null };
   setBusy(true);
   const failures = [];
   const skipped = [];
@@ -340,9 +341,12 @@ async function runBatch(dbName, files) {
     fd.append('file', file, file.name);
     return uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
   };
-  for (const file of files) {
+  renderQueue();
+  while (batch.queue.length) {
     if (batch.cancelled) break;
+    const file = batch.queue.shift();
     batch.index++;
+    renderQueue();
     renderUpload(file.name, 0, file.size);
     try {
       // Advisory pre-check by name and size: saves a pointless transfer; the hash check after the upload is authoritative.
@@ -373,12 +377,13 @@ async function runBatch(dbName, files) {
       else if (!batch.cancelled) failures.push(file.name + ': ' + (j.error || j.status));
     } catch (e) {
       batch.xhr = null;
-      if (e.message === 'signed out') { batch = null; setBusy(false); return; }
+      if (e.message === 'signed out') { batch = null; renderQueue(); setBusy(false); return; }
       if (!batch.cancelled) failures.push(file.name + ': ' + e.message);
     }
   }
   const b = batch;
   batch = null; jobWaiter = null;
+  renderQueue();
   setBusy(false);
   // Clean final state: no live Cancel button, and no stale "Uploading..." panel when the last file
   // never reached the import phase (phase-1 cancel/abort or upload error). A job that reached a
@@ -390,17 +395,42 @@ async function runBatch(dbName, files) {
   if (b.cancelled) msg += '; cancelled after file ' + b.index + ' of ' + b.total + ' (remaining skipped)';
   if (failures.length) msg += '; ' + failures.length + ' failed: ' + failures.join('; ');
   show('importerror', msg);
-  $('ifile').value = '';
   loadDbs();
 }
 
+// Waiting files (not yet started). Names are untrusted: textContent only.
+function renderQueue() {
+  const ul = $('queuelist');
+  const q = batch ? batch.queue : [];
+  $('queuebox').hidden = !q.length;
+  ul.replaceChildren(...q.map((file) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span'); name.textContent = file.name;
+    const rm = document.createElement('button'); rm.type = 'button'; rm.textContent = 'Remove';
+    rm.setAttribute('aria-label', 'Remove ' + file.name + ' from the queue');
+    rm.addEventListener('click', () => {
+      if (!batch) return;
+      const i = batch.queue.indexOf(file);
+      if (i < 0) return;   // already started
+      batch.queue.splice(i, 1); batch.total--;
+      renderQueue();
+    });
+    li.append(name, rm);
+    return li;
+  }));
+}
+
 $('uploadbtn').addEventListener('click', () => {
-  if (batch) return;
   const dbName = db();
   const files = Array.from($('ifile').files);
   if (!dbName) return show('importerror', 'Select or create a database first.');
   if (!files.length) return show('importerror', 'Choose a file to upload.');
+  if (batch && batch.cancelled) return show('importerror', 'The batch is being cancelled; wait for it to stop.');
+  // Simplest safe rule: files added mid-batch go to the running batch's database only.
+  if (batch && dbName !== batch.db) return show('importerror', 'Uploads are running into "' + batch.db + '"; select that database to add more files.');
   show('importerror', '');
+  $('ifile').value = '';
+  if (batch) { batch.queue.push(...files); batch.total += files.length; renderQueue(); return; }
   runBatch(dbName, files);
 });
 
