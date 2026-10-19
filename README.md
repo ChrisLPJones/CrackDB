@@ -1,6 +1,6 @@
-# CrackDB
+# HoarderDB
 
-CrackDB is a command-line tool for importing wordlists into a database and exporting new wordlists that match specific requirements, most commonly by password length. It is designed for security testing and password research, where wordlists are often very large (hundreds of gigabytes) and need to be merged, deduplicated, and filtered quickly. Passwords are stored in an embedded database, so there is no server to run and the database is a single portable directory.
+HoarderDB is a command-line tool for importing wordlists into a database and exporting new wordlists that match specific requirements, most commonly by password length. It is designed for security testing and password research, where wordlists are often very large (hundreds of gigabytes) and need to be merged, deduplicated, and filtered quickly. Passwords are stored in an embedded database, so there is no server to run and the database is a single portable directory.
 
 ## Features
 
@@ -169,7 +169,7 @@ FOUND    : 'hunter2' is in the database.
 
 ## How It Works
 
-CrackDB stores each password in an embedded RocksDB key-value store under a key of the form `[length][password]`. Because the key begins with the length, all data is physically ordered by length, which makes the supported queries efficient:
+HoarderDB stores each password in an embedded RocksDB key-value store under a key of the form `[length][password]`. Because the key begins with the length, all data is physically ordered by length, which makes the supported queries efficient:
 
 1. An exact lookup is a single point read.
 2. A single length, or a length range, is one contiguous scan.
@@ -186,7 +186,7 @@ Disk space is traded for speed, so a database is larger than the source wordlist
 
 ## Intended Use
 
-CrackDB is intended for authorized security testing, password-strength research, CTF challenges, and managing your own wordlists. Only use it against systems you own or are explicitly authorized to test.
+HoarderDB is intended for authorized security testing, password-strength research, CTF challenges, and managing your own wordlists. Only use it against systems you own or are explicitly authorized to test.
 
 ## Contributing
 

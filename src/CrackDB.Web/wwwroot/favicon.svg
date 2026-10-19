@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Papers stuffed into the open top drawer, drawn first so the cabinet overlaps their base -->
+  <g>
+    <rect x="15" y="10" width="20" height="26" rx="1.5" fill="#f6f1e3" stroke="#b8ae93" stroke-width="1"
+      transform="rotate(-11 25 23)"/>
+    <rect x="27" y="8" width="20" height="26" rx="1.5" fill="#fffdf6" stroke="#b8ae93" stroke-width="1"
+      transform="rotate(9 37 21)"/>
+    <rect x="22" y="6" width="20" height="24" rx="1.5" fill="#fbf6e8" stroke="#b8ae93" stroke-width="1"
+      transform="rotate(-2 32 18)"/>
+    <g stroke="#c9bfa2" stroke-width="1.4" stroke-linecap="round" transform="rotate(-2 32 18)">
+      <line x1="25" y1="12" x2="39" y2="12"/>
+      <line x1="25" y1="16" x2="39" y2="16"/>
+      <line x1="25" y1="20" x2="36" y2="20"/>
+    </g>
+  </g>
+
+  <!-- Filing cabinet -->
+  <rect x="10" y="22" width="44" height="36" rx="3" fill="#3a4556" stroke="#232a35" stroke-width="1.5"/>
+
+  <!-- Top (open) drawer front, lower than the body top so papers appear to spill out -->
+  <rect x="13" y="25" width="38" height="11" rx="1.5" fill="#4d5a6e" stroke="#232a35" stroke-width="1"/>
+  <rect x="26" y="29.5" width="12" height="3" rx="1.5" fill="#2a5bd7"/>
+
+  <!-- Closed bottom drawer -->
+  <rect x="13" y="39" width="38" height="16" rx="1.5" fill="#465268" stroke="#232a35" stroke-width="1"/>
+  <rect x="26" y="45.5" width="12" height="3" rx="1.5" fill="#2a5bd7"/>
+</svg>
