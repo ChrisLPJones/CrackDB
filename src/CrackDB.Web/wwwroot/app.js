@@ -86,14 +86,16 @@ $('statsbtn').addEventListener('click', async () => {
     const out = $('stats');
     out.textContent = '';
     if (s.lengths) {
-      const t = document.createElement('table');
-      t.append(...s.lengths.map((l) => {
-        const tr = document.createElement('tr');
-        const a = document.createElement('td'); a.textContent = 'length ' + l.length;
-        const b = document.createElement('td'); b.textContent = fmt(l.count);
-        tr.append(a, b); return tr;
+      const grid = document.createElement('div');
+      grid.className = 'lengthgrid';
+      grid.append(...s.lengths.map((l) => {
+        const cell = document.createElement('div');
+        cell.className = 'lengthcell';
+        const a = document.createElement('span'); a.className = 'muted'; a.textContent = 'length ' + l.length + ': ';
+        const b = document.createElement('span'); b.textContent = fmt(l.count);
+        cell.append(a, b); return cell;
       }));
-      out.append(t);
+      out.append(grid);
     }
   } catch (e) { fail('stats', e); }
 });
