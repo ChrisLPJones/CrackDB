@@ -96,7 +96,11 @@
         <div><label for="emin">Min length</label><input id="emin" name="min" type="number" min="0"></div>
         <div><label for="emax">Max length</label><input id="emax" name="max" type="number" min="0"></div>
       </div>
-      <button class="primary" type="submit">Download .txt</button>
+      <div>
+        <label for="efile">Output file name</label>
+        <input id="efile" name="filename" type="text" maxlength="100" autocomplete="off" spellcheck="false">
+      </div>
+      <button id="exportbtn" class="primary" type="submit">Export wordlist.lst</button>
     </form>
   </section>
 
@@ -124,15 +128,10 @@
       </summary>
       <p class="hint">Databases are compacted automatically every Sunday at 00:00 in the server's configured time zone (Australia/Sydney by default).</p>
       <div id="size" class="result"></div>
-      <details class="subpanel">
-        <summary>
-          <span class="disclosure-arrow" aria-hidden="true"></span>
-          <h3>Full length breakdown</h3>
-        </summary>
-        <p class="hint">Exact count per password length. This scans the whole database, so it can take a while on large ones.</p>
-        <button id="statsbtn" class="primary" type="button">Load full breakdown</button>
-        <div id="stats" class="result"></div>
-      </details>
+      <h3>Full length breakdown</h3>
+      <p class="hint">Exact count per password length. This scans the whole database, so it can take a while on large ones.</p>
+      <button id="statsbtn" class="primary" type="button">Load full breakdown</button>
+      <div id="stats" class="result"></div>
     </details>
   </section>
 </main>

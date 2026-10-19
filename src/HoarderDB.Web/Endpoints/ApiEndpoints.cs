@@ -193,7 +193,7 @@ public static class ApiEndpoints
             int? min = req.Min, max = req.Max;
             if (Validate(ref min, ref max, req.Length, req.Limit) is { } bad) return bad;
             var lease = dbs.AcquireRead(name);   // owned by the result; released after the stream ends
-            return new StreamingExportResult(lease, name, min, max, req.Limit);
+            return new StreamingExportResult(lease, name, min, max, req.Limit, req.Filename);
         });
     }
 
@@ -217,7 +217,7 @@ public static class ApiEndpoints
         return null;
     }
 
-    private sealed record ExportRequest(int? Min, int? Max, int? Length, long? Limit);
+    private sealed record ExportRequest(int? Min, int? Max, int? Length, long? Limit, string? Filename = null);
 
     // The UI submits a plain form POST (so the browser streams the download to disk); scripts may send JSON.
     private static async Task<(ExportRequest req, IResult? error)> ReadExportRequest(HttpContext ctx)
@@ -227,7 +227,9 @@ public static class ApiEndpoints
             if (ctx.Request.HasFormContentType)
             {
                 var f = await ctx.Request.ReadFormAsync(ctx.RequestAborted);
-                return (new ExportRequest(Int(f["min"]), Int(f["max"]), Int(f["length"]), Long(f["limit"])), null);
+                // Absent field = legacy name; present (even empty) = sanitised user name.
+                string? fn = f.TryGetValue("filename", out var fv) && fv.Count > 0 ? fv[0] ?? "" : null;
+                return (new ExportRequest(Int(f["min"]), Int(f["max"]), Int(f["length"]), Long(f["limit"]), fn), null);
             }
             if (ctx.Request.ContentLength is null or 0 && !ctx.Request.Headers.ContainsKey("Transfer-Encoding"))
                 return (new ExportRequest(null, null, null, null), null);
@@ -249,7 +251,7 @@ public static class ApiEndpoints
 /// buffered in ~512 KiB chunks and written asynchronously (Kestrel forbids sync body writes).
 /// The lease outlives the whole stream and is released in finally.
 /// </summary>
-internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit) : IResult
+internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename) : IResult
 {
     private const int ChunkBytes = 512 * 1024;
 
@@ -263,10 +265,12 @@ internal sealed class StreamingExportResult(DbLease lease, string name, int? min
                 (null, null) => "all",
                 _ => $"{min?.ToString() ?? "0"}-{max?.ToString() ?? "max"}",
             };
-            // Filename is built server-side from the validated db name and numbers only.
+            // Legacy name is built server-side from the validated db name and numbers only; a user-supplied
+            // name only ever reaches the header through ExportFileName's allowlist rebuild.
             ctx.Response.ContentType = "text/plain; charset=utf-8";
-            ctx.Response.Headers.ContentDisposition =
-                $"attachment; filename=\"{name}_{range}_{DateTime.UtcNow:yyyyMMddHHmmss}.txt\"";
+            ctx.Response.Headers.ContentDisposition = filename is null
+                ? $"attachment; filename=\"{name}_{range}_{DateTime.UtcNow:yyyyMMddHHmmss}.txt\""
+                : ExportFileName.ContentDisposition(ExportFileName.Sanitise(filename));
 
             using var buf = new MemoryStream(ChunkBytes + 64 * 1024);
             await using var writer = new StreamWriter(buf, new UTF8Encoding(false), 64 * 1024, leaveOpen: true) { NewLine = "\n" };
