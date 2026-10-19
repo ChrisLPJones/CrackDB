@@ -294,8 +294,16 @@ function track(id) {
       renderJob(j);
       if (!TERMINAL.includes(j.status)) setTimeout(() => track(id), 2000);
     } catch (e) {
-      fail('joberror', e);
       closeEvents();
+      // Batch file whose job vanished (server restarted: 502/network error, or 404 as jobs are in memory):
+      // report it as interrupted so runBatch waits for the server and re-uploads the file.
+      if (jobWaiter && jobWaiter.id === id && (e.status === 404 || isTransient(e))) {
+        const w = jobWaiter; jobWaiter = null; currentJob = null;
+        show('joberror', '');
+        w.resolve({ status: 'interrupted', error: e.message });
+        return;
+      }
+      fail('joberror', e);
       // The job can no longer be followed (e.g. server restart): fail the batch's file so it moves on.
       // Nulling jobWaiter first makes a later real terminal snapshot a no-op (resolves only once).
       if (jobWaiter && jobWaiter.id === id) {
@@ -322,7 +330,7 @@ function uploadXhr(fd, onProgress, onXhr) {   // reject(e): e.status / e.data ho
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
       else reject(httpError(xhr.status, data));
     };
-    xhr.onerror = () => reject(new Error('Upload failed.'));
+    xhr.onerror = () => { const e = new Error('Upload failed.'); e.status = 0; reject(e); };   // status 0 = network error (transient)
     xhr.onabort = () => reject(new Error('cancelled'));
     xhr.send(fd);
   });
@@ -346,6 +354,47 @@ function renderUpload(name, loaded, total) {
   $('jobcancel').textContent = 'Cancel';
 }
 
+// ---- resilience to a server restart / outage during a batch ----
+// Transient = the server (or the proxy in front of it) is briefly unavailable: 502/503/504 or a network
+// error (status 0, or fetch's TypeError). Never 4xx (409, 413, 401 ...) or 507: those are real answers.
+const MAX_RETRIES = 3;                  // retries per file before it is recorded as failed
+const HEALTH_POLL_MS = 3000;            // /healthz poll interval while waiting
+const HEALTH_GIVE_UP_MS = 10 * 60 * 1000;   // give up waiting for the server after 10 minutes
+function isTransient(e) {
+  if (!e || e.message === 'signed out' || e.message === 'cancelled') return false;
+  if (e.status === undefined) return e instanceof TypeError;
+  return e.status === 0 || e.status === 502 || e.status === 503 || e.status === 504;
+}
+// Sleep that ends early when the batch is cancelled.
+async function sleepUnlessCancelled(ms) {
+  for (let t = 0; t < ms && !batch.cancelled; t += 250) await new Promise((r) => setTimeout(r, 250));
+}
+// Polls GET /healthz until it answers 200. Resolves true when up, false if cancelled; throws after the give-up time.
+async function waitForServer(file, attempt) {
+  const started = Date.now();
+  $('job').hidden = false;
+  $('jobcancel').hidden = false; $('jobcancel').textContent = 'Cancel';
+  currentJob = null;
+  while (!batch.cancelled) {
+    show('jobwait', 'Server unavailable - waiting to retry file ' + file.name + ' (attempt ' + attempt + ' of ' + MAX_RETRIES + ')' + batchSuffix());
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 4000);
+    batch.xhr = { abort: () => ctl.abort() };   // lets Cancel interrupt the probe at once
+    try {
+      const r = await fetch('/healthz', { cache: 'no-store', signal: ctl.signal });
+      if (r.ok) { show('jobwait', ''); return true; }
+    } catch (e) { /* still down */ }
+    finally { clearTimeout(timer); batch.xhr = null; }
+    if (Date.now() - started > HEALTH_GIVE_UP_MS) {
+      show('jobwait', '');
+      throw new Error('server did not come back within ' + Math.round(HEALTH_GIVE_UP_MS / 60000) + ' minutes');
+    }
+    await sleepUnlessCancelled(HEALTH_POLL_MS);
+  }
+  show('jobwait', '');
+  return false;
+}
+
 // Known limitation: the batch state lives in memory only. A page reload mid-batch re-attaches to the
 // active job (see below) but does not resume the files that were not yet sent.
 // Files are sent one at a time and each import must finish before the next upload starts, so the
@@ -365,44 +414,59 @@ async function runBatch(dbName, files) {
     return uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
   };
   renderQueue();
+  const gaveUp = [];   // failed after exhausting the retries on a transient/interrupted failure
+  let aborted = null;  // set when the server never came back: the rest of the queue is not attempted
+  // One attempt at one file. Resolves normally when the file reached a final outcome (imported, skipped
+  // or failed for a real reason); throws a transient / interrupted error so the caller can wait and retry.
+  const processFile = async (file) => {
+    renderUpload(file.name, 0, file.size);
+    // Advisory pre-check by name and size: saves a pointless transfer; the hash check after the upload is authoritative.
+    let force = false;
+    try {
+      const chk = await post('/api/dbs/' + enc(dbName) + '/imports/check', { name: file.name, size: file.size });
+      if (chk.duplicate) {
+        if (!confirm('"' + file.name + '" looks already imported on ' + when(chk.duplicate) + '. Upload anyway?')) { skipped.push(file.name); return; }
+        force = true;
+      }
+    } catch (e) { if (e.message === 'signed out' || isTransient(e)) throw e; /* otherwise the check is only a hint */ }
+    let res;
+    try { res = await send(file, force); }
+    catch (e) {
+      if (!(e.status === 409 && e.data && e.data.code === 'already_imported')) throw e;
+      batch.xhr = null;
+      if (!confirm('"' + file.name + '" has identical content to an import on ' + when(e.data.duplicateOf) + '. Import it again anyway?')) { skipped.push(file.name); return; }
+      renderUpload(file.name, 0, file.size);
+      res = await send(file, true);
+    }
+    const { id } = res;
+    batch.xhr = null;
+    if (res.note) { show('jobnote', res.note); }
+    const finished = new Promise((resolve) => { jobWaiter = { id, resolve }; });
+    track(id);
+    const j = await finished;
+    if (j.status === 'interrupted') { const e = new Error('import interrupted (' + j.error + ')'); e.interrupted = true; throw e; }
+    if (j.status === 'completed') imported++;
+    else if (!batch.cancelled) failures.push(file.name + ': ' + (j.error || j.status));
+  };
   while (batch.queue.length) {
     if (batch.cancelled) break;
     const file = batch.queue.shift();
     batch.index++;
     renderQueue();
-    renderUpload(file.name, 0, file.size);
-    try {
-      // Advisory pre-check by name and size: saves a pointless transfer; the hash check after the upload is authoritative.
-      let force = false;
-      try {
-        const chk = await post('/api/dbs/' + enc(dbName) + '/imports/check', { name: file.name, size: file.size });
-        if (chk.duplicate) {
-          if (!confirm('"' + file.name + '" looks already imported on ' + when(chk.duplicate) + '. Upload anyway?')) { skipped.push(file.name); continue; }
-          force = true;
-        }
-      } catch (e) { if (e.message === 'signed out') throw e; /* the check is only a hint */ }
-      let res;
-      try { res = await send(file, force); }
+    for (let retries = 0; ; ) {
+      try { await processFile(file); break; }
       catch (e) {
-        if (!(e.status === 409 && e.data && e.data.code === 'already_imported')) throw e;
         batch.xhr = null;
-        if (!confirm('"' + file.name + '" has identical content to an import on ' + when(e.data.duplicateOf) + '. Import it again anyway?')) { skipped.push(file.name); continue; }
-        renderUpload(file.name, 0, file.size);
-        res = await send(file, true);
+        if (e.message === 'signed out') { batch = null; renderQueue(); setBusy(false); return; }
+        if (batch.cancelled) break;
+        if (!e.interrupted && !isTransient(e)) { failures.push(file.name + ': ' + e.message); break; }
+        if (retries >= MAX_RETRIES) { gaveUp.push(file.name + ': ' + e.message + ', after ' + MAX_RETRIES + ' retries'); break; }
+        retries++;
+        try { if (!(await waitForServer(file, retries))) break; }   // false = cancelled
+        catch (we) { gaveUp.push(file.name + ': ' + we.message); aborted = we.message; break; }
       }
-      const { id } = res;
-      batch.xhr = null;
-      if (res.note) { show('jobnote', res.note); }
-      const finished = new Promise((resolve) => { jobWaiter = { id, resolve }; });
-      track(id);
-      const j = await finished;
-      if (j.status === 'completed') imported++;
-      else if (!batch.cancelled) failures.push(file.name + ': ' + (j.error || j.status));
-    } catch (e) {
-      batch.xhr = null;
-      if (e.message === 'signed out') { batch = null; renderQueue(); setBusy(false); return; }
-      if (!batch.cancelled) failures.push(file.name + ': ' + e.message);
     }
+    if (aborted) break;
   }
   const b = batch;
   batch = null; jobWaiter = null;
@@ -412,11 +476,14 @@ async function runBatch(dbName, files) {
   // never reached the import phase (phase-1 cancel/abort or upload error). A job that reached a
   // terminal state keeps its final panel (renderJob already hid Cancel).
   $('jobcancel').hidden = true;
+  show('jobwait', '');
   if (!currentJob) $('job').hidden = true;
   let msg = imported + ' of ' + b.total + ' imported';
   if (skipped.length) msg += '; ' + skipped.length + ' skipped (already imported): ' + skipped.join(', ');
   if (b.cancelled) msg += '; cancelled after file ' + b.index + ' of ' + b.total + ' (remaining skipped)';
   if (failures.length) msg += '; ' + failures.length + ' failed: ' + failures.join('; ');
+  if (gaveUp.length) msg += '; ' + gaveUp.length + ' failed after retries (server unavailable): ' + gaveUp.join('; ');
+  if (aborted) msg += '; stopped, ' + b.queue.length + ' file' + (b.queue.length === 1 ? '' : 's') + ' not attempted';
   show('importerror', msg);
   loadDbs();
 }
