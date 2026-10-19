@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CrackDB;
 using CrackDB.Web.Jobs;
 
 namespace CrackDB.Web.Tests;
@@ -131,6 +132,45 @@ public class HeadroomGuardTests
             Assert.Contains("memory", j.GetProperty("error").GetString()!, StringComparison.OrdinalIgnoreCase);
         }
         finally { HeadroomGuard.AvailableBytesReader = saved; }
+    }
+
+    // Regression coverage for the budget/headroom mismatch bug: MemoryPlan.DefaultBudgetBytes() and
+    // HeadroomGuard.HasHeadroom must be computed from the same cross-checked number (CrackDB.SystemMemory),
+    // so they never disagree the way they could when MemoryPlan read raw GC totals and HeadroomGuard
+    // read the cross-checked figure. This drives the shared primitive's inputs directly (never
+    // overriding HeadroomGuard.AvailableBytesReader itself), so both consumers go through their real,
+    // unmodified default wiring onto SystemMemory.
+    [Fact]
+    public void BudgetAndHeadroom_AgreeOnTheSameCrossCheckedAvailableFigure()
+    {
+        var savedGc = SystemMemory.GcReader;
+        var savedProc = SystemMemory.ProcMeminfoReader;
+        try
+        {
+            const long MiB = 1024 * 1024;
+            const long GiB = 1024 * MiB;
+
+            // Reproduces the real-world scenario: an unconstrained cgroup makes the GC report the
+            // outer host's full 32 GiB, while the real, cross-checked figure (/proc/meminfo on a 9 GiB
+            // LXC) is only 6 GiB. Before the fix, MemoryPlan.DefaultBudgetBytes() would have sized a
+            // budget off the inflated 32 GiB figure (~16 GiB), which HeadroomGuard's correctly
+            // cross-checked ~6 GiB "available" could never satisfy - every import would fail.
+            SystemMemory.GcReader = () => 32L * GiB;
+            SystemMemory.ProcMeminfoReader = () => 6L * GiB;
+
+            long budget = MemoryPlan.DefaultBudgetBytes();
+            Assert.Equal(3L * GiB, budget);   // 50% of the lower (6 GiB), not the inflated 32 GiB
+
+            // The same cross-checked 6 GiB figure is what HeadroomGuard sees as "available", so a
+            // budget sized off it plus the ~1 GB margin fits comfortably - no more mismatch.
+            Assert.True(HeadroomGuard.HasHeadroom(budget, out var reason));
+            Assert.Null(reason);
+        }
+        finally
+        {
+            SystemMemory.GcReader = savedGc;
+            SystemMemory.ProcMeminfoReader = savedProc;
+        }
     }
 
     [Fact]
