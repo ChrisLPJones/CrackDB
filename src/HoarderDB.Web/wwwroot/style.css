@@ -41,7 +41,7 @@ button.danger:disabled { opacity: .6; cursor: not-allowed; }
 .error:empty { min-height: 0; margin: 0; }
 .result { margin-top: 8px; white-space: pre-wrap; word-break: break-word; }
 .muted { color: var(--muted); }
-.lengthgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 16px; margin-top: 8px; }
+.lengthgrid { display: grid; grid-auto-flow: column; grid-template-columns: repeat(3, 1fr); gap: 4px 16px; margin-top: 8px; }
 .lengthcell { white-space: nowrap; }
 @media (max-width: 480px) {
   .lengthgrid { grid-template-columns: repeat(2, 1fr); }

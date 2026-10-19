@@ -88,6 +88,11 @@ $('statsbtn').addEventListener('click', async () => {
     if (s.lengths) {
       const grid = document.createElement('div');
       grid.className = 'lengthgrid';
+      // Column-major fill (column 1 = the lowest lengths, column 2 = the next chunk, and so on),
+      // evenly split across columns regardless of how many distinct lengths there are.
+      const cols = window.matchMedia('(max-width: 480px)').matches ? 2 : 3;
+      const rows = Math.max(1, Math.ceil(s.lengths.length / cols));
+      grid.style.gridTemplateRows = `repeat(${rows}, auto)`;
       grid.append(...s.lengths.map((l) => {
         const cell = document.createElement('div');
         cell.className = 'lengthcell';
