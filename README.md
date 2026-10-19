@@ -19,11 +19,11 @@ HoarderDB is a command-line tool for importing wordlists into a database and exp
 
 1. Clone the repository:
    ```
-   git clone https://github.com/ChrisLPJones/CrackDB.git
+   git clone https://github.com/ChrisLPJones/HoarderDB.git
    ```
 2. Navigate to the project directory:
    ```
-   cd CrackDB
+   cd HoarderDB
    ```
 3. Build the solution:
    ```
