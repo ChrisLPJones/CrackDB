@@ -23,8 +23,12 @@ h2 { font-size: 1.1rem; margin: 0 0 8px; }
 #history-panel .disclosure-arrow { display: block; font-size: 0.75em; color: var(--muted); transition: transform 0.15s; }
 #history-panel .disclosure-arrow::before { content: '\25B6'; }
 #history-panel details[open] .disclosure-arrow { transform: rotate(90deg); }
+/* Most sections are a short form/button stack and stay a comfortable reading width even on a
+   wide page; only sections with content that benefits from extra room (a wide table, a growing
+   results list) use the full page width. */
 section, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 16px; margin: 16px 0; }
+  padding: 16px; margin: 16px auto; max-width: 760px; }
+#history-panel { max-width: none; }
 label { display: block; font-size: .9rem; color: var(--muted); margin: 8px 0 2px; }
 input, select, button { font: inherit; color: var(--text); background: var(--surface);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
