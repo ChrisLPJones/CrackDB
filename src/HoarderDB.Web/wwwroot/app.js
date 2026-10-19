@@ -42,7 +42,7 @@ async function loadSize() {
   const wanted = db();
   try {
     const s = await api('/api/dbs/' + enc(wanted) + '/stats?full=false');
-    if (db() === wanted) show('size', '~' + fmt(s.estimatedCount) + ' passwords (approximate)');
+    if (db() === wanted) show('size', fmt(s.estimatedCount) + ' passwords (approximate)');
   } catch (e) { if (db() === wanted) fail('size', e); }
 }
 
