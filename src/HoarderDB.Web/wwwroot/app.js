@@ -36,6 +36,28 @@ async function loadDbs(selectName) {
 
 function updateExportAction() { $('export').action = '/api/dbs/' + enc(db()) + '/export'; }
 
+// Export file name: follows min/max until the user edits it; clearing it resumes following. The server
+// re-sanitises whatever is sent, so this is cosmetic. Button text is set with textContent only.
+let exportNameTouched = false;
+function defaultExportName() {
+  const mn = $('emin').value.trim(), mx = $('emax').value.trim();
+  if (mn && mx) return 'wordlist-' + mn + '-' + mx + '.lst';
+  if (mn) return 'wordlist-min' + mn + '.lst';
+  if (mx) return 'wordlist-max' + mx + '.lst';
+  return 'wordlist.lst';
+}
+function refreshExportUi() {
+  const file = $('efile');
+  if (!exportNameTouched) file.value = defaultExportName();
+  $('exportbtn').textContent = 'Export ' + (file.value.trim() || 'wordlist.lst');
+}
+$('emin').addEventListener('input', refreshExportUi);
+$('emax').addEventListener('input', refreshExportUi);
+$('efile').addEventListener('input', () => {
+  exportNameTouched = $('efile').value !== '';
+  refreshExportUi();
+});
+
 // Cheap approximate size: refreshed on db selection and when a job finishes (no polling).
 async function loadSize() {
   if (!db()) { show('size', ''); return; }
@@ -48,6 +70,7 @@ async function loadSize() {
 
 function onDbChanged() {
   updateExportAction();
+  refreshExportUi();
   show('stats', '');
   loadSize();
   loadHistory();

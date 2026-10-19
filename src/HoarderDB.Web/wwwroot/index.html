@@ -96,7 +96,11 @@
         <div><label for="emin">Min length</label><input id="emin" name="min" type="number" min="0"></div>
         <div><label for="emax">Max length</label><input id="emax" name="max" type="number" min="0"></div>
       </div>
-      <button class="primary" type="submit">Download .txt</button>
+      <div>
+        <label for="efile">Output file name</label>
+        <input id="efile" name="filename" type="text" maxlength="100" autocomplete="off" spellcheck="false">
+      </div>
+      <button id="exportbtn" class="primary" type="submit">Export wordlist.lst</button>
     </form>
   </section>
 
