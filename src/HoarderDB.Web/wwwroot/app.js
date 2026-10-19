@@ -278,7 +278,7 @@ function renderJob(j) {
 
 function closeEvents() { if (events) { events.close(); events = null; } }
 // During a batch the Upload button stays usable: it appends more files to the queue.
-function setBusy(b) { $('uploadbtn').disabled = b && !batch; }
+function setBusy(b) { $('uploadbtn').disabled = b && !batch; $('uploadbtn').textContent = batch ? 'Upload to queue' : 'Upload and import'; }
 
 function track(id) {
   closeEvents();
