@@ -37,6 +37,8 @@ services.AddSingleton<IValidateOptions<StorageOptions>, StorageOptionsValidator>
 services.AddSingleton<IValidateOptions<AuthOptions>, AuthOptionsValidator>();
 services.AddOptions<UploadOptions>().BindConfiguration(UploadOptions.Section).ValidateOnStart();
 services.AddSingleton<IValidateOptions<UploadOptions>, UploadOptionsValidator>();
+services.AddOptions<CompactionOptions>().BindConfiguration(CompactionOptions.Section).ValidateOnStart();
+services.AddSingleton<IValidateOptions<CompactionOptions>, CompactionOptionsValidator>();
 
 // Storage
 services.AddSingleton<DataRootResolver>();
