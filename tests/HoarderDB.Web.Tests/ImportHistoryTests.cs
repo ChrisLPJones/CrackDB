@@ -647,6 +647,24 @@ public class ImportHistoryTests
     }
 
     [Fact]
+    public void Service_List_ReturnsMoreThan200Entries_UpToMaxEntries()
+    {
+        var (root, h, dir) = Fixture();
+        try
+        {
+            var sb = new StringBuilder("{\"v\":1,\"entries\":[");
+            for (int i = 0; i < 450; i++)
+                sb.Append(i == 0 ? "" : ",").Append($"{{\"id\":\"i{i}\",\"jobId\":\"job{i}\",\"source\":\"s\",\"sha256\":\"{Abc}\",\"status\":\"completed\"}}");
+            File.WriteAllText(Path.Combine(dir, ImportHistory.FileName), sb.Append("]}").ToString());
+            var page = h.List("Test_unit", ImportHistory.MaxEntries, 0);
+            Assert.Equal(450, page.Entries.Count);
+            Assert.Equal("job449", page.Entries[0].JobId);
+            Assert.Equal(450, h.List("Test_unit", 100000, 0).Entries.Count);   // clamped to MaxEntries, still all
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void Service_NeverCreatesDirectories_WhenTheDbIsGone()
     {
         var (root, h, _) = Fixture();

@@ -74,6 +74,9 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 dialog h2 { margin-top: 0; }
 
 .tablewrap { overflow-x: auto; }
+/* Import history can hold thousands of rows: scroll inside the box, header stays visible. */
+#histwrap { max-height: 24rem; overflow-y: auto; }
+#hist thead th { position: sticky; top: 0; background: var(--surface); }
 #hist { font-size: .85rem; width: 100%; }
 #hist th { color: var(--muted); font-weight: 600; white-space: nowrap; }
 #hist td { overflow-wrap: anywhere; vertical-align: top; padding-bottom: 4px; }
