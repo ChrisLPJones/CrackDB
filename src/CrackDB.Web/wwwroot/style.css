@@ -13,7 +13,7 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1484px; margin: 0 auto; padding: 16px; }
+main { max-width: 760px; margin: 0 auto; padding: 16px; }
 header.bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 h1 { font-size: 1.4rem; margin: 8px 0; }
 h2 { font-size: 1.1rem; margin: 0 0 8px; }
@@ -23,12 +23,8 @@ h2 { font-size: 1.1rem; margin: 0 0 8px; }
 #history-panel .disclosure-arrow { display: block; font-size: 0.75em; color: var(--muted); transition: transform 0.15s; }
 #history-panel .disclosure-arrow::before { content: '\25B6'; }
 #history-panel details[open] .disclosure-arrow { transform: rotate(90deg); }
-/* Most sections are a short form/button stack and stay a comfortable reading width even on a
-   wide page; only sections with content that benefits from extra room (a wide table, a growing
-   results list) use the full page width. */
 section, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 16px; margin: 16px auto; max-width: 760px; }
-#history-panel { max-width: none; }
+  padding: 16px; margin: 16px 0; }
 label { display: block; font-size: .9rem; color: var(--muted); margin: 8px 0 2px; }
 input, select, button { font: inherit; color: var(--text); background: var(--surface);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }

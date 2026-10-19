@@ -58,7 +58,6 @@ $('db').addEventListener('change', onDbChanged);
 // ---- import history (advisory record of past imports; all values are untrusted text) ----
 
 const fmtDate = (s) => (s ? new Date(s).toLocaleString() : '-');
-const fmtRange = (r) => (r.min == null && r.max == null ? 'all' : (r.min == null ? 0 : r.min) + '-' + (r.max == null ? 'max' : r.max));
 
 async function loadHistory() {
   const wanted = db();
@@ -70,12 +69,7 @@ async function loadHistory() {
     body.replaceChildren(...h.entries.map((r) => {
       const tr = document.createElement('tr');
       const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
-      const st = document.createElement('td');
-      const badge = document.createElement('span'); badge.className = 'badge ' + r.status;
-      badge.textContent = r.status === 'backfilled' ? 'Backfilled' : r.status;
-      st.append(badge);
-      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)), st,
-        cell(r.sha256.slice(0, 12), r.sha256), cell(fmtRange(r) + (r.forced ? ' (forced)' : '')));
+      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
       return tr;
     }));
     show('histinfo', h.total ? (h.total > h.entries.length ? 'Showing the latest ' + h.entries.length + ' of ' + h.total + '. ' : '') +
