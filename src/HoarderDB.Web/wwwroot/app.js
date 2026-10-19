@@ -195,7 +195,7 @@ function tickTimer() {
     while (s.length > 2 && now - s[0].t > RATE_WINDOW_MS) s.shift();
     const span = now - s[0].t;
     const rate = span >= RATE_MIN_SPAN_MS ? (u - s[0].u) / (span / 1000) : 0;
-    if (rate <= 0) text += ' - calculating time left...';
+    if (!(rate > 0)) text += ' - calculating time left...';
     else {
       const fileLeft = (2 * batch.cur.size - curUnits()) / rate;
       const batchLeft = (2 * batch.totalBytes - u) / rate;
