@@ -92,3 +92,19 @@ dialog h2 { margin-top: 0; }
 .queuebox ul { list-style: none; margin: 4px 0 0; padding: 0; }
 .queuebox li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
 .queuebox li span { min-width: 0; overflow-wrap: anywhere; }
+
+/* Buttons are centered in their section; the header's Sign out is the one exception. */
+.actions { display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; }
+.row { justify-content: center; }
+input.visually-hidden, .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.filepick { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 8px; }
+.filebtn { display: inline-block; margin: 0; cursor: pointer; font: inherit; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.filepick .hint { margin: 0; overflow-wrap: anywhere; text-align: center; }
+#ifile:focus-visible + .filebtn { outline: 2px solid var(--accent); outline-offset: 2px; }
+#hist .sortbtn { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: inherit; white-space: nowrap; }
+#hist .sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#hist .sortind { display: inline-block; min-width: 1em; margin-left: 2px; font-size: .75em; }
+/* Long queues scroll inside the box; the heading stays above it. */
+.queuebox ul { max-height: 12rem; overflow-y: auto; }

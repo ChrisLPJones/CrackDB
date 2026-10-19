@@ -82,20 +82,50 @@ $('db').addEventListener('change', onDbChanged);
 
 const fmtDate = (s) => (s ? new Date(s).toLocaleString() : '-');
 
+let histEntries = [];
+let histSort = { key: 'date', dir: 'desc' };   // default: newest first, as the server returns it
+const histName = (r) => (r.source && r.source.startsWith('upload:') ? r.source.slice('upload:'.length) : (r.source || ''));
+const histKeys = {
+  date: (r) => (r.importedAt ? Date.parse(r.importedAt) || 0 : 0),
+  name: (r) => histName(r).toLowerCase(),
+  size: (r) => Number(r.sizeBytes) || 0,
+  lines: (r) => Number(r.linesRead) || 0,
+};
+function renderHistory() {
+  const k = histKeys[histSort.key];
+  const sign = histSort.dir === 'asc' ? 1 : -1;
+  const rows = histEntries.map((r, i) => ({ r, i, v: k(r) }));
+  rows.sort((x, y) => (x.v < y.v ? -sign : x.v > y.v ? sign : x.i - y.i));
+  $('histbody').replaceChildren(...rows.map(({ r }) => {
+    const tr = document.createElement('tr');
+    const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
+    tr.append(cell(fmtDate(r.importedAt)), cell(histName(r), r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
+    return tr;
+  }));
+  document.querySelectorAll('#hist th[data-sort]').forEach((th) => {
+    const active = th.dataset.sort === histSort.key;
+    th.setAttribute('aria-sort', active ? (histSort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    th.querySelector('.sortind').textContent = active ? (histSort.dir === 'asc' ? '\u25B2' : '\u25BC') : '';
+  });
+}
+document.querySelectorAll('#hist th[data-sort]').forEach((th) => {
+  th.querySelector('button').addEventListener('click', () => {
+    const key = th.dataset.sort;
+    histSort = histSort.key === key ? { key, dir: histSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: key === 'name' ? 'asc' : 'desc' };
+    renderHistory();
+  });
+});
+
 async function loadHistory() {
   const wanted = db();
   const body = $('histbody');
-  if (!wanted) { body.replaceChildren(); show('histinfo', ''); return; }
+  if (!wanted) { histEntries = []; body.replaceChildren(); show('histinfo', ''); return; }
   try {
     const h = await api('/api/dbs/' + enc(wanted) + '/imports?limit=5000');
     if (db() !== wanted) return;
-    body.replaceChildren(...h.entries.map((r) => {
-      const tr = document.createElement('tr');
-      const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
-      const name = r.source && r.source.startsWith('upload:') ? r.source.slice('upload:'.length) : r.source;
-      tr.append(cell(fmtDate(r.importedAt)), cell(name, r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
-      return tr;
-    }));
+    histEntries = h.entries;
+    renderHistory();
     show('histinfo', h.total ? (h.total > h.entries.length ? 'Showing the latest ' + h.entries.length + ' of ' + h.total + '. ' : '') +
       'Imports run from the command line are not recorded. Lines read is the count of lines in the file, not new passwords.'
       : 'No imports recorded for this database yet.');
@@ -136,6 +166,48 @@ let events = null;
 let currentJob = null;
 let batch = null;       // { db, queue, index, total, cancelled, xhr } while a multi-file upload runs
 let jobWaiter = null;   // { id, resolve } - lets the batch loop await a job's terminal state
+// Upload timer: elapsed for the current file and for the whole batch; keeps counting through retry waits.
+let timerId = null;
+const fmtClock = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const p = (n) => String(n).padStart(2, '0');
+  return s >= 3600 ? Math.floor(s / 3600) + ':' + p(Math.floor(s / 60) % 60) + ':' + p(s % 60) : p(Math.floor(s / 60)) + ':' + p(s % 60);
+};
+// Progress is counted in "units": each file is 2 x its size (upload, then import), so one smoothed
+// rate (units/s, moving average over the last RATE_WINDOW_MS) covers both phases.
+const RATE_WINDOW_MS = 15000;
+const RATE_MIN_SPAN_MS = 3000;     // "calculating..." until this much history exists
+const MAX_ETA_S = 24 * 3600;       // cap silly estimates
+const fmtEta = (s) => (s > MAX_ETA_S ? 'over 24:00:00' : fmtClock(s * 1000));
+const curUnits = () => (batch && batch.cur ? batch.cur.up + batch.cur.imp : 0);
+function tickTimer() {
+  if (!batch) return;
+  const now = Date.now();
+  let text = 'Elapsed ' + fmtClock(now - batch.fileStart) + ' (batch ' + fmtClock(now - batch.startedAt) + ')';
+  if (batch.paused) {
+    batch.samples = [];   // the wait must not drag the rate down
+    text += ' - paused, waiting for the server';
+  } else {
+    const u = batch.doneUnits + curUnits();
+    const s = batch.samples;
+    if (s.length && u < s[s.length - 1].u) s.length = 0;   // a file restarted
+    s.push({ t: now, u });
+    while (s.length > 2 && now - s[0].t > RATE_WINDOW_MS) s.shift();
+    const span = now - s[0].t;
+    const rate = span >= RATE_MIN_SPAN_MS ? (u - s[0].u) / (span / 1000) : 0;
+    if (!(rate > 0)) text += ' - calculating time left...';
+    else {
+      const fileLeft = (2 * batch.cur.size - curUnits()) / rate;
+      const batchLeft = (2 * batch.totalBytes - u) / rate;
+      text += ' - ' + fmtBytes(rate) + '/s - file ~' + fmtEta(Math.max(0, fileLeft)) + ' left - about ' + fmtEta(Math.max(0, batchLeft)) + ' left (batch)';
+    }
+  }
+  show('jobtimer', text);
+}
+function stopTimer(finalText) {
+  if (timerId) { clearInterval(timerId); timerId = null; }
+  show('jobtimer', finalText || '');
+}
 const batchSuffix = () => (batch ? ' (file ' + batch.index + ' of ' + batch.total + ')' : '');
 
 const post = (path, body) => api(path, {
@@ -240,6 +312,10 @@ function renderJob(j) {
   $('job').hidden = false;
   $('jobtitle').textContent = (j.kind === 'import' ? 'Import into ' : 'Compact ') + j.db + batchSuffix();
   const st = $('jobstatus'); st.textContent = j.status; st.className = 'badge ' + j.status;
+  if (batch && batch.cur && j.kind === 'import') {
+    batch.cur.up = batch.cur.size;
+    if (j.bytesTotal > 0) batch.cur.imp = batch.cur.size * Math.min(1, j.bytesRead / j.bytesTotal);
+  }
   const bar = $('jobbar');
   if (j.kind === 'import' && j.bytesTotal > 0) { bar.max = 100; bar.value = Math.min(100, (j.bytesRead / j.bytesTotal) * 100); }
   else if (j.status === 'completed') { bar.max = 100; bar.value = 100; }
@@ -343,6 +419,7 @@ function renderUpload(name, loaded, total) {
   $('jobtitle').textContent = 'Uploading ' + name + batchSuffix();
   const st = $('jobstatus'); st.textContent = 'uploading'; st.className = 'badge running';
   const pct = total > 0 ? Math.min(100, (loaded / total) * 100) : 0;
+  if (batch && batch.cur) { batch.cur.up = batch.cur.size * pct / 100; batch.cur.imp = 0; }
   const bar = $('jobbar'); bar.max = 100; bar.value = pct;
   const dt = document.createElement('dt'); dt.textContent = 'Uploaded';
   const dd = document.createElement('dd');
@@ -372,6 +449,7 @@ async function sleepUnlessCancelled(ms) {
 // Polls GET /healthz until it answers 200. Resolves true when up, false if cancelled; throws after the give-up time.
 async function waitForServer(file, attempt) {
   const started = Date.now();
+  batch.paused = true;
   $('job').hidden = false;
   $('jobcancel').hidden = false; $('jobcancel').textContent = 'Cancel';
   currentJob = null;
@@ -382,16 +460,18 @@ async function waitForServer(file, attempt) {
     batch.xhr = { abort: () => ctl.abort() };   // lets Cancel interrupt the probe at once
     try {
       const r = await fetch('/healthz', { cache: 'no-store', signal: ctl.signal });
-      if (r.ok) { show('jobwait', ''); return true; }
+      if (r.ok) { show('jobwait', ''); batch.paused = false; return true; }
     } catch (e) { /* still down */ }
     finally { clearTimeout(timer); batch.xhr = null; }
     if (Date.now() - started > HEALTH_GIVE_UP_MS) {
       show('jobwait', '');
+      batch.paused = false;
       throw new Error('server did not come back within ' + Math.round(HEALTH_GIVE_UP_MS / 60000) + ' minutes');
     }
     await sleepUnlessCancelled(HEALTH_POLL_MS);
   }
   show('jobwait', '');
+  batch.paused = false;
   return false;
 }
 
@@ -400,8 +480,12 @@ async function waitForServer(file, attempt) {
 // Files are sent one at a time and each import must finish before the next upload starts, so the
 // server's single-upload gate never answers 409 and only one job is ever active.
 async function runBatch(dbName, files) {
-  batch = { db: dbName, queue: files.slice(), index: 0, total: files.length, cancelled: false, xhr: null };
+  batch = { db: dbName, queue: files.slice(), index: 0, total: files.length, cancelled: false, xhr: null, startedAt: Date.now(), fileStart: Date.now(),
+    totalBytes: files.reduce((n, f) => n + f.size, 0), doneUnits: 0, cur: { size: 0, up: 0, imp: 0 }, samples: [], paused: false };
   setBusy(true);
+  if (timerId) clearInterval(timerId);
+  timerId = setInterval(tickTimer, 1000);
+  tickTimer();
   const failures = [];
   const skipped = [];
   let imported = 0;
@@ -452,12 +536,15 @@ async function runBatch(dbName, files) {
     if (batch.cancelled) break;
     const file = batch.queue.shift();
     batch.index++;
+    batch.fileStart = Date.now();
+    batch.cur = { size: file.size, up: 0, imp: 0 };
+    tickTimer();
     renderQueue();
     for (let retries = 0; ; ) {
       try { await processFile(file); break; }
       catch (e) {
         batch.xhr = null;
-        if (e.message === 'signed out') { batch = null; renderQueue(); setBusy(false); return; }
+        if (e.message === 'signed out') { stopTimer(); batch = null; renderQueue(); setBusy(false); return; }
         if (batch.cancelled) break;
         if (!e.interrupted && !isTransient(e)) { failures.push(file.name + ': ' + e.message); break; }
         if (retries >= MAX_RETRIES) { gaveUp.push(file.name + ': ' + e.message + ', after ' + MAX_RETRIES + ' retries'); break; }
@@ -466,9 +553,12 @@ async function runBatch(dbName, files) {
         catch (we) { gaveUp.push(file.name + ': ' + we.message); aborted = we.message; break; }
       }
     }
+    batch.doneUnits += 2 * file.size;   // finished one way or another: counts as done for the batch estimate
+    batch.cur = { size: 0, up: 0, imp: 0 };
     if (aborted) break;
   }
   const b = batch;
+  stopTimer('Batch finished in ' + fmtClock(Date.now() - b.startedAt));
   batch = null; jobWaiter = null;
   renderQueue();
   setBusy(false);
@@ -493,6 +583,7 @@ function renderQueue() {
   const ul = $('queuelist');
   const q = batch ? batch.queue : [];
   $('queuebox').hidden = !q.length;
+  $('queuehead').textContent = 'Waiting in the queue: ' + q.length + (q.length === 1 ? ' file' : ' files');
   ul.replaceChildren(...q.map((file) => {
     const li = document.createElement('li');
     const name = document.createElement('span'); name.textContent = file.name;
@@ -502,13 +593,19 @@ function renderQueue() {
       if (!batch) return;
       const i = batch.queue.indexOf(file);
       if (i < 0) return;   // already started
-      batch.queue.splice(i, 1); batch.total--;
+      batch.queue.splice(i, 1); batch.total--; batch.totalBytes -= file.size;
       renderQueue();
     });
     li.append(name, rm);
     return li;
   }));
 }
+
+function updateFileSummary() {
+  const f = $('ifile').files;
+  $('ifilesummary').textContent = !f.length ? 'No files selected' : f.length === 1 ? f[0].name : f.length + ' files selected';
+}
+$('ifile').addEventListener('change', updateFileSummary);
 
 $('uploadbtn').addEventListener('click', () => {
   const dbName = db();
@@ -520,7 +617,8 @@ $('uploadbtn').addEventListener('click', () => {
   if (batch && dbName !== batch.db) return show('importerror', 'Uploads are running into "' + batch.db + '"; select that database to add more files.');
   show('importerror', '');
   $('ifile').value = '';
-  if (batch) { batch.queue.push(...files); batch.total += files.length; renderQueue(); return; }
+  updateFileSummary();
+  if (batch) { batch.queue.push(...files); batch.total += files.length; batch.totalBytes += files.reduce((n, f) => n + f.size, 0); renderQueue(); return; }
   runBatch(dbName, files);
 });
 

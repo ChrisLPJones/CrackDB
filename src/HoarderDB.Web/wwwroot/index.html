@@ -21,15 +21,17 @@
     <label for="db">Select a database</label>
     <select id="db"></select>
     <p id="dberror" class="error" role="alert"></p>
-    <div class="row">
+    <div class="actions">
       <button id="createtoggle" class="primary" type="button">Create</button>
       <button id="deltoggle" class="danger" type="button">Delete database...</button>
     </div>
     <div id="delconfirm" hidden>
       <label for="delname">Type the database name to confirm permanent deletion</label>
       <input id="delname" type="text" autocomplete="off" spellcheck="false" maxlength="64">
-      <button id="delbtn" class="danger" type="button">Delete permanently</button>
-      <button id="delcancel" type="button">Cancel</button>
+      <div class="actions">
+        <button id="delbtn" class="danger" type="button">Delete permanently</button>
+        <button id="delcancel" type="button">Cancel</button>
+      </div>
     </div>
     <p id="deleteerror" class="error" role="alert"></p>
   </section>
@@ -40,7 +42,7 @@
       <label for="newdb">New, empty database name</label>
       <input id="newdb" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. rockyou" maxlength="64">
       <p id="createerror" class="error" role="alert"></p>
-      <div class="row">
+      <div class="actions">
         <button id="createbtn" class="primary" type="submit">Create</button>
         <button id="createcancel" type="button">Cancel</button>
       </div>
@@ -50,11 +52,14 @@
   <section id="import-panel">
     <h2>Import</h2>
     <p class="hint">Uploads one or more wordlists from this browser into the currently selected database, one at a time (each file is imported before the next is uploaded). You can pick more files while an upload is running; they are added to the queue for the same database. Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
-    <label for="ifile">Wordlist file(s)</label>
-    <input id="ifile" type="file" multiple>
-    <button id="uploadbtn" class="primary" type="button">Upload and import</button>
+    <div class="filepick">
+      <input id="ifile" class="visually-hidden" type="file" multiple>
+      <label for="ifile" class="filebtn">Choose files&hellip;</label>
+      <span id="ifilesummary" class="hint" aria-live="polite">No files selected</span>
+    </div>
+    <div class="actions"><button id="uploadbtn" class="primary" type="button">Upload and import</button></div>
     <div id="queuebox" class="queuebox" hidden>
-      <strong>Waiting in the queue</strong>
+      <strong id="queuehead">Waiting in the queue</strong>
       <ul id="queuelist"></ul>
     </div>
     <p id="importerror" class="error" role="alert"></p>
@@ -62,11 +67,12 @@
     <div id="job" class="job" hidden>
       <div class="jobhead"><strong id="jobtitle"></strong><span id="jobstatus" class="badge"></span></div>
       <p id="jobwait" class="hint"></p>
+      <p id="jobtimer" class="hint" role="timer"></p>
       <progress id="jobbar" max="100" value="0"></progress>
       <dl id="jobstats"></dl>
       <p id="jobnote" class="hint"></p>
       <p id="joberror" class="error" role="alert"></p>
-      <button id="jobcancel" type="button">Cancel</button>
+      <div class="actions"><button id="jobcancel" type="button">Cancel</button></div>
     </div>
   </section>
 
@@ -75,7 +81,7 @@
     <p class="hint">Finds every stored password that contains the text anywhere (case-insensitive), not just an exact match. This scans the database in the background and can take a while on a large one; only one search runs at a time, server-wide.</p>
     <label for="squery">Password or substring (at least 4 characters)</label>
     <input id="squery" type="text" autocomplete="off" spellcheck="false" maxlength="256">
-    <button id="searchbtn" class="primary" type="button">Search</button>
+    <div class="actions"><button id="searchbtn" class="primary" type="button">Search</button></div>
     <p id="searcherror" class="error" role="alert"></p>
 
     <div id="searchjob" class="job" hidden>
@@ -84,7 +90,7 @@
       <progress id="searchbar"></progress>
       <dl id="searchstats"></dl>
       <p id="searchjoberror" class="error" role="alert"></p>
-      <button id="searchcancel" type="button">Cancel</button>
+      <div class="actions"><button id="searchcancel" type="button">Cancel</button></div>
       <ul id="searchresults" class="result searchresults"></ul>
     </div>
   </section>
@@ -100,7 +106,7 @@
         <label for="efile">Output file name</label>
         <input id="efile" name="filename" type="text" maxlength="100" autocomplete="off" spellcheck="false">
       </div>
-      <button id="exportbtn" class="primary" type="submit">Export wordlist.lst</button>
+      <div class="actions"><button id="exportbtn" class="primary" type="submit">Export wordlist.lst</button></div>
     </form>
   </section>
 
@@ -113,7 +119,12 @@
       <p id="histinfo" class="hint"></p>
       <div class="tablewrap" id="histwrap">
         <table id="hist">
-          <thead><tr><th>Date</th><th>Name</th><th>Size</th><th>Lines read</th></tr></thead>
+          <thead><tr>
+            <th data-sort="date" aria-sort="descending"><button type="button" class="sortbtn">Date<span class="sortind" aria-hidden="true"></span></button></th>
+            <th data-sort="name" aria-sort="none"><button type="button" class="sortbtn">Name<span class="sortind" aria-hidden="true"></span></button></th>
+            <th data-sort="size" aria-sort="none"><button type="button" class="sortbtn">Size<span class="sortind" aria-hidden="true"></span></button></th>
+            <th data-sort="lines" aria-sort="none"><button type="button" class="sortbtn">Lines read<span class="sortind" aria-hidden="true"></span></button></th>
+          </tr></thead>
           <tbody id="histbody"></tbody>
         </table>
       </div>
@@ -130,7 +141,7 @@
       <div id="size" class="result"></div>
       <h3>Full length breakdown</h3>
       <p class="hint">Exact count per password length. This scans the whole database, so it can take a while on large ones.</p>
-      <button id="statsbtn" class="primary" type="button">Load full breakdown</button>
+      <div class="actions"><button id="statsbtn" class="primary" type="button">Load full breakdown</button></div>
       <div id="stats" class="result"></div>
     </details>
   </section>
