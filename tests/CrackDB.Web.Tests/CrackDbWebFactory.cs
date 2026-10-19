@@ -28,6 +28,7 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
     /// <summary>Throwaway incoming dir (Test_&lt;guid&gt; under the OS temp dir), separate from the data root.</summary>
     public string Incoming { get; }
     private readonly CrackDB.Web.Jobs.IImportProgressHook? _hook;
+    private readonly CrackDB.Web.Jobs.ISearchProgressHook? _searchHook;
     private readonly int _loginLimit;
     private readonly Dictionary<string, string?> _extra;
     private readonly string? _remoteIp;
@@ -37,9 +38,10 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
     /// <param name="extraConfig">Extra configuration keys (e.g. ForwardedProxies).</param>
     /// <param name="remoteIp">If set, every request appears to come from this peer address (TestServer has none).</param>
     internal CrackDbWebFactory(int loginLimit, Dictionary<string, string?>? extraConfig = null, string? remoteIp = null,
-        CrackDB.Web.Jobs.IImportProgressHook? hook = null)
+        CrackDB.Web.Jobs.IImportProgressHook? hook = null, CrackDB.Web.Jobs.ISearchProgressHook? searchHook = null)
     {
         _hook = hook;
+        _searchHook = searchHook;
         _loginLimit = loginLimit;
         _extra = extraConfig ?? new();
         _remoteIp = remoteIp;
@@ -89,6 +91,8 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
         }.Concat(_extra)));
         if (_hook is not null)
             builder.ConfigureServices(s => s.AddSingleton(_hook));
+        if (_searchHook is not null)
+            builder.ConfigureServices(s => s.AddSingleton(_searchHook));
         if (_remoteIp is not null)
         {
             var ip = IPAddress.Parse(_remoteIp);

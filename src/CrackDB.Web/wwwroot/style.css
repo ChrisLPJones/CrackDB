@@ -65,3 +65,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .badge.completed { color: var(--accent); border-color: var(--accent); }
 .badge.cancelled { color: var(--muted); }
 .badge.backfilled { color: var(--muted); font-style: italic; }
+
+.searchresults { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.searchresults li { padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.searchresults li:last-child { border-bottom: none; }
