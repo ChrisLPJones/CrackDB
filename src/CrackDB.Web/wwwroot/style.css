@@ -43,6 +43,10 @@ button.danger:disabled { opacity: .6; cursor: not-allowed; }
 .muted { color: var(--muted); }
 .lengthgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 16px; margin-top: 8px; }
 .lengthcell { white-space: nowrap; }
+@media (max-width: 480px) {
+  .lengthgrid { grid-template-columns: repeat(2, 1fr); }
+  .lengthcell { white-space: normal; }
+}
 table { border-collapse: collapse; margin-top: 8px; }
 td, th { padding: 2px 12px 2px 0; text-align: left; }
 .login { max-width: 360px; margin: 10vh auto; }
