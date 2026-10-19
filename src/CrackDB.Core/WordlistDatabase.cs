@@ -27,6 +27,14 @@ public sealed class WordlistDatabase : IDisposable
     /// <summary>The memory plan this handle was opened with (write buffers, import pipeline sizes).</summary>
     public MemoryPlan Plan => _plan;
 
+    // Fixed, operator-level bounds on RocksDB's baseline memory, independent of ImportMemoryMb and
+    // never client/request-configurable. Without these, index/filter block memory and open
+    // file-handle/table-reader overhead are unbounded by default and grow with the number of SST
+    // files on disk, i.e. with total db size, regardless of whether an import is running (observed
+    // as idle RSS climbing with db size on a production host).
+    public const long BlockCacheBytes = 256L * 1024 * 1024;    // 256 MB cap shared by index/filter/data blocks
+    public const int MaxOpenFilesCap = 4096;                   // caps file-handle/table-reader overhead per open
+
     /// <param name="bulkLoad">
     /// Open tuned for a large import: a vector memtable (O(1) append inserts,
     /// sorted once at flush) instead of the default skiplist, which roughly
@@ -36,7 +44,18 @@ public sealed class WordlistDatabase : IDisposable
     /// Memory this handle may use for memtables and the import pipeline; null = half of the
     /// memory available to the process (see <see cref="MemoryPlan.DefaultBudgetBytes"/>).
     /// </param>
-    public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false, long? memoryBudgetBytes = null)
+    /// <param name="enableAutoCompaction">
+    /// Only meaningful for a non-bulk open (a bulk-load open already disables auto-compactions
+    /// unconditionally, for import speed). True (the default) matches a genuine standalone
+    /// read/compact open: RocksDB may auto-compact once enough L0 files accumulate. Pass false for
+    /// a handle that only serves reads between queued jobs, so a brief reopen between two imports
+    /// doesn't silently re-arm a background compaction against the whole on-disk dataset -
+    /// compaction then only happens via an explicit <see cref="Compact"/> call. This never affects
+    /// read correctness: data is still flushed and visible; only the auto-compaction *trigger* is
+    /// suppressed.
+    /// </param>
+    public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false, long? memoryBudgetBytes = null,
+        bool enableAutoCompaction = true)
     {
         _enc = encoding;
 
@@ -51,6 +70,13 @@ public sealed class WordlistDatabase : IDisposable
         // applied on every open.
         int procs = Environment.ProcessorCount;
         _plan = MemoryPlan.Compute(memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes(), procs);
+
+        // Caps RocksDB's baseline memory (index/filter blocks + open file handles) to a fixed size
+        // regardless of how large the db grows on disk. Applied on every open, bulk or read.
+        var tableOptions = new BlockBasedTableOptions()
+            .SetBlockCache(Cache.CreateLru((ulong)BlockCacheBytes))
+            .SetCacheIndexAndFilterBlocks(true);
+
         var options = new DbOptions()
             .SetCreateIfMissing(true)
             .IncreaseParallelism(procs)
@@ -63,7 +89,9 @@ public sealed class WordlistDatabase : IDisposable
             .SetMinWriteBufferNumberToMerge(1)
             .SetTargetFileSizeBase(512ul * 1024 * 1024)
             .SetBytesPerSync(16ul * 1024 * 1024)
-            .SetCompression(Compression.No);           // no compression: trade disk for CPU
+            .SetCompression(Compression.No)            // no compression: trade disk for CPU
+            .SetBlockBasedTableFactory(tableOptions)
+            .SetMaxOpenFiles(MaxOpenFilesCap);
 
         if (bulkLoad)
         {
@@ -78,9 +106,11 @@ public sealed class WordlistDatabase : IDisposable
         }
         else
         {
-            // Read/compact opens: let compaction run so the DB stays healthy.
+            // Read/compact opens: let compaction run so the DB stays healthy, unless the caller
+            // only wants this handle to serve reads between jobs (enableAutoCompaction: false).
             options.SetAllowConcurrentMemtableWrite(true)
                    .SetLevel0FileNumCompactionTrigger(4);
+            if (!enableAutoCompaction) options.SetDisableAutoCompactions(1);
         }
 
         _db = RocksDb.Open(options, path);
@@ -109,6 +139,24 @@ public sealed class WordlistDatabase : IDisposable
     {
         var s = _db.GetProperty("rocksdb.estimate-num-keys");
         return long.TryParse(s, out var n) ? n : 0;
+    }
+
+    /// <summary>
+    /// Number of SST files currently sitting at level 0 (instant; from RocksDB's internal stats).
+    /// Mainly a test/diagnostic hook: with auto-compaction suppressed this should stay flat across
+    /// repeated imports with no explicit <see cref="Compact"/>; with it enabled it should collapse.
+    /// </summary>
+    public long NumFilesAtLevel0()
+    {
+        var s = _db.GetProperty("rocksdb.num-files-at-level0");
+        return long.TryParse(s, out var n) ? n : 0;
+    }
+
+    /// <summary>The block cache's configured capacity in bytes, straight from the engine (test/diagnostic hook).</summary>
+    public long BlockCacheCapacityBytes()
+    {
+        var s = _db.GetProperty("rocksdb.block-cache-capacity");
+        return long.TryParse(s, out var n) ? n : -1;
     }
 
     /// <summary>

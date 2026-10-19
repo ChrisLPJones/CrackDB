@@ -20,6 +20,12 @@ public interface IDbManager
         Func<WordlistDatabase, CancellationToken, Task<T>> work, CancellationToken ct,
         bool allowCreate = false, bool failIfExists = false);
     /// <summary>
+    /// The import memory budget (bytes) this manager resolved at startup: the configured
+    /// Storage:ImportMemoryMb, or the engine's auto default. Fixed/operator config, never
+    /// client-supplied; used by the job-start headroom check (see HeadroomGuard).
+    /// </summary>
+    long ResolvedImportBudgetBytes { get; }
+    /// <summary>
     /// Creates a new, empty database (left open for reads). <see cref="DbAlreadyExistsException"/> (409)
     /// if it exists, <see cref="DbLimitReachedException"/> (409) at the database-count cap.
     /// </summary>
@@ -113,7 +119,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             if (_closed) throw new ObjectDisposedException(nameof(DbManager));
             // The dir may have been deleted between ResolveExisting and here (fresh entry after a delete): never let the always-create ctor resurrect it.
             if (entry.Handle == null && !DataRootResolver.IsDatabaseDir(path)) throw new DbNotFoundException("Database not found.");
-            entry.Handle ??= Open(path, DbOpenMode.Read, entry);
+            entry.Handle ??= Open(path, DbOpenMode.Read, entry, enableAutoCompaction: true);
             entry.Readers++;
             return new DbLease(entry, entry.Handle);
         }
@@ -149,17 +155,24 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
                     await Task.Delay(25, ct);
                 }
                 WordlistDatabase db;
-                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry); entry.Writing = true; Monitor.PulseAll(entry.Gate); }
+                // The job's own open (import = Bulk, compact = Read): keeps today's behaviour, so an
+                // explicit compact job still runs with auto-compaction enabled on its handle.
+                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry, enableAutoCompaction: true); entry.Writing = true; Monitor.PulseAll(entry.Gate); }
                 try { return await work(db, ct); }
                 finally
                 {
                     // Always reopen Read (Dispose flushes; WAL is off), even when work failed or was cancelled.
+                    // enableAutoCompaction:false here is the fix for the closed loophole: this reopen only
+                    // serves reads between queued jobs, so it must not silently re-arm a background
+                    // compaction against the whole on-disk dataset mid-batch. Compaction then only runs via
+                    // an explicit `compact` job. This does not affect read correctness (data is still
+                    // flushed and visible), only the auto-compaction trigger.
                     lock (entry.Gate)
                     {
                         entry.Writing = false;
                         entry.Handle?.Dispose();
                         entry.Handle = null;
-                        entry.Handle = Open(path, DbOpenMode.Read, entry);
+                        entry.Handle = Open(path, DbOpenMode.Read, entry, enableAutoCompaction: false);
                     }
                 }
             }
@@ -227,12 +240,16 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         if (_resolver.List().Count >= _maxDatabases) throw new DbLimitReachedException("Database limit reached.");
     }
 
-    private WordlistDatabase Open(string path, DbOpenMode mode, DbEntry entry)
+    private WordlistDatabase Open(string path, DbOpenMode mode, DbEntry entry, bool enableAutoCompaction)
     {
-        var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk, memoryBudgetBytes: _memoryBudgetBytes);
+        var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk,
+            memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction);
         entry.Mode = mode;
         return db;
     }
+
+    /// <summary>The import memory budget this manager resolved at startup (configured or auto default).</summary>
+    public long ResolvedImportBudgetBytes => _memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes();
 
     public Task StartAsync(CancellationToken cancellationToken)
     {

@@ -75,6 +75,13 @@ public class CrackDbWebFactory : WebApplicationFactory<Program>
             ["Storage:DataRoot"] = Root,
             ["Storage:IncomingRoot"] = Incoming,
             ["Storage:KeyPath"] = Path.Combine(Root, "keys-not-a-db"),
+            // Fixed, small budget rather than "auto": auto derives from GC.GetGCMemoryInfo's reported
+            // total available memory, which some sandboxed/nested dev or CI hosts over-report (observed:
+            // sysconf(_SC_PHYS_PAGES) reflecting the outer host rather than this environment's real,
+            // cgroup-visible RAM). That mismatch doesn't affect production (ImportMemoryMb is always
+            // configured there), but it would make the headroom backstop (HeadroomGuard) spuriously
+            // refuse every job in tests if left on auto. A test can still override via extraConfig.
+            ["Storage:ImportMemoryMb"] = "256",
             ["Auth:Username"] = Username,
             ["Auth:PasswordHash"] = new PasswordHasher<string>().HashPassword(Username, Password),
             ["Auth:ApiKeyHash"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(ApiKey))),
