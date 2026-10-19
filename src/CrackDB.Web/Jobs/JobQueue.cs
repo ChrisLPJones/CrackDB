@@ -75,6 +75,14 @@ public sealed class JobQueue(
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(job.Cts.Token, _stopping.Token);
         try
         {
+            // Cheap safety net: refuse the job rather than risk an OOM crash if there isn't enough
+            // headroom above the configured import budget. Checked for every job (import or
+            // compact), since both run through the same bulk/read handle and memory budget.
+            if (!HeadroomGuard.HasHeadroom(dbs.ResolvedImportBudgetBytes, out var headroomReason))
+            {
+                job.Finish(JobStatus.Failed, headroomReason!);
+                return;
+            }
             if (job.Kind == JobKind.Import) await ImportRunner.RunAsync(job, dbs, hook, linked.Token);
             else await CompactRunner.RunAsync(job, dbs, linked.Token);
             // An import that was cancelled returned normally with a partial, flushed result.
