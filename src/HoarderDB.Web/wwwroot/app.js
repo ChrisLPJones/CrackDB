@@ -69,7 +69,8 @@ async function loadHistory() {
     body.replaceChildren(...h.entries.map((r) => {
       const tr = document.createElement('tr');
       const cell = (text, title) => { const td = document.createElement('td'); td.textContent = text; if (title) td.title = title; return td; };
-      tr.append(cell(fmtDate(r.importedAt)), cell(r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
+      const name = r.source && r.source.startsWith('upload:') ? r.source.slice('upload:'.length) : r.source;
+      tr.append(cell(fmtDate(r.importedAt)), cell(name, r.source), cell(fmtBytes(r.sizeBytes)), cell(fmt(r.linesRead)));
       return tr;
     }));
     show('histinfo', h.total ? (h.total > h.entries.length ? 'Showing the latest ' + h.entries.length + ' of ' + h.total + '. ' : '') +
