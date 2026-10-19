@@ -119,13 +119,23 @@ const post = (path, body) => api(path, {
   body: JSON.stringify(body),
 });
 
-$('createbtn').addEventListener('click', async () => {
+$('createtoggle').addEventListener('click', () => {
+  show('createerror', '');
+  $('newdb').value = '';
+  $('createdialog').showModal();
+  $('newdb').focus();
+});
+$('createcancel').addEventListener('click', () => { $('createdialog').close(); });
+
+$('createform').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
   const name = $('newdb').value.trim();
   if (!name) { show('createerror', 'Enter a database name.'); return; }
   try {
     await post('/api/dbs', { name });
     show('createerror', '');
     $('newdb').value = '';
+    $('createdialog').close();
     await loadDbs(name);
   } catch (e) { fail('createerror', e); }
 });
