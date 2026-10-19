@@ -15,11 +15,19 @@ public readonly record struct MemoryPlan(
     private const long ChunkEstimateBytes = 8 * MiB;   // 4M chars of strings + write batch + slop, per in-flight chunk
     public const int DefaultChunkChars = 4_000_000;
 
-    /// <summary>50% of the memory this process may use (honors cgroup/LXC limits), at least 256 MB.</summary>
+    /// <summary>
+    /// 50% of the memory actually available to this process right now (honors cgroup/LXC limits),
+    /// at least 256 MB. Uses <see cref="SystemMemory.AvailableBytesReader"/> - the same cross-checked
+    /// (GC info vs. <c>/proc/meminfo</c>) primitive <c>CrackDB.Web.Jobs.HeadroomGuard</c> uses - so the
+    /// auto-detected budget and the headroom safety check never disagree because they read from
+    /// different sources. An ambiguous/unreadable reading falls back to the 256 MB floor rather than
+    /// guessing a bigger budget.
+    /// </summary>
     public static long DefaultBudgetBytes()
     {
-        long avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        return Math.Max(MinBudget, avail / 2);
+        long? avail = SystemMemory.AvailableBytesReader();
+        if (avail is null) return MinBudget;
+        return Math.Max(MinBudget, avail.Value / 2);
     }
 
     public static MemoryPlan Compute(long budgetBytes, int procs, int requestedThreads = 0)
