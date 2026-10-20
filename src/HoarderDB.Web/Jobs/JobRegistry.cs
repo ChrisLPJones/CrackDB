@@ -22,7 +22,7 @@ public sealed class JobRegistry
         {
             _finished.Enqueue(job.Id);
             while (_finished.Count > MaxFinished)
-                _jobs.TryRemove(_finished.Dequeue(), out _);
+                if (_jobs.TryRemove(_finished.Dequeue(), out var old)) old.Dispose();   // frees a search job's spool file
         }
     }
 

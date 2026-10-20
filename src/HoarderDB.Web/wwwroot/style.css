@@ -1,12 +1,12 @@
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --text: #1b1f24; --muted: #5b6573;
-  --border: #d5d9e0; --accent: #2a5bd7; --accent-text: #ffffff; --danger: #b3261e;
+  --border: #d5d9e0; --accent: #2a5bd7; --accent-text: #ffffff; --danger: #b3261e; --success: #1a7f37;
   --warn-bg: #fff4d6; --warn-border: #c58b00; --warn-text: #4a3500;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14171c; --surface: #1d2128; --text: #e6e9ee; --muted: #9aa4b2;
-    --border: #333a45; --accent: #6b93ff; --accent-text: #0d1117; --danger: #ff8a80;
+    --border: #333a45; --accent: #6b93ff; --accent-text: #0d1117; --danger: #ff8a80; --success: #56d364;
     --warn-bg: #3a2e0c; --warn-border: #d4a017; --warn-text: #ffe9a8;
   }
 }
@@ -40,6 +40,7 @@ button.danger:disabled { opacity: .6; cursor: not-allowed; }
 .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text); }
 .check input { width: auto; }
 .error { color: var(--danger); min-height: 1.5em; }
+.success { color: var(--success); font-weight: 600; }
 .error:empty { min-height: 0; margin: 0; }
 .result { margin-top: 8px; white-space: pre-wrap; word-break: break-word; }
 .muted { color: var(--muted); }
@@ -84,27 +85,51 @@ dialog h2 { margin-top: 0; }
 .badge.cancelled { color: var(--muted); }
 .badge.backfilled { color: var(--muted); font-style: italic; }
 
-.searchresults { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
-.searchresults li { padding: 2px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.searchresults li:last-child { border-bottom: none; }
+.searchresults { margin: 8px 0 0; padding: 6px 8px; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px;
+  white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 .queuebox { margin: 8px 0; font-size: .9rem; }
 .queuebox ul { list-style: none; margin: 4px 0 0; padding: 0; }
 .queuebox li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
 .queuebox li span { min-width: 0; overflow-wrap: anywhere; }
 
-/* Buttons are centered in their section; the header's Sign out is the one exception. */
-.actions { display: flex; justify-content: center; align-items: center; gap: 12px; flex-wrap: wrap; }
-.row { justify-content: center; }
+/* Buttons are left-aligned, as before the centring change. */
+.actions { display: flex; justify-content: flex-start; align-items: center; gap: 12px; flex-wrap: wrap; }
 input.visually-hidden, .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.filepick { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 8px; }
+.filepick { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 8px; }
 .filebtn { display: inline-block; margin: 0; cursor: pointer; font: inherit; color: var(--text); background: var(--surface);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
-.filepick .hint { margin: 0; overflow-wrap: anywhere; text-align: center; }
+.filebtn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.filebtn.disabled { opacity: .6; cursor: not-allowed; }
+.filepick .hint { margin: 0; overflow-wrap: anywhere; }
 #ifile:focus-visible + .filebtn { outline: 2px solid var(--accent); outline-offset: 2px; }
 #hist .sortbtn { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: inherit; white-space: nowrap; }
 #hist .sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #hist .sortind { display: inline-block; min-width: 1em; margin-left: 2px; font-size: .75em; }
 /* Long queues scroll inside the box; the heading stays above it. */
 .queuebox ul { max-height: 12rem; overflow-y: auto; }
+
+/* Long unbroken text (a 300-character search term, a long file name) wraps inside its box instead of widening the page. */
+.jobhead strong { min-width: 0; overflow-wrap: anywhere; }
+.hint, .error, .success, .result, #searchjob dd, #jobstats dd { overflow-wrap: anywhere; }
+.searchresults { max-width: 100%; box-sizing: border-box; }
+
+/* The hidden attribute must win over display rules such as .check { display: flex }. */
+[hidden] { display: none !important; }
+/* Search options: pill toggles (real checkboxes, visually restyled). The pill stays neutral; only the dot fills. */
+.searchopts { margin-top: 10px; }
+.toggles { display: flex; flex-wrap: wrap; gap: 8px; }
+.pill { position: relative; display: inline-block; margin: 0; }
+.pill input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.pill span { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px 6px 10px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--surface); color: var(--text); font-size: .95rem; user-select: none; }
+.pill span::before { content: ''; flex: none; box-sizing: border-box; width: 1.1em; height: 1.1em; border-radius: 50%;
+  border: 2px solid var(--muted); background: transparent; }
+.pill input:checked + span { border-color: var(--accent); }
+.pill input:checked + span::before { background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.7 2.7L12 5.5' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; border-color: var(--accent); }
+.pill input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill input:disabled + span { opacity: .6; cursor: not-allowed; }
+
+/* Same top spacing as buttons, so the Download all link sits where Cancel was. */
+.actions .filebtn { margin-top: 12px; text-decoration: none; }

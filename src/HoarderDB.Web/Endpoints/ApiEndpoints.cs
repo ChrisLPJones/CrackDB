@@ -8,6 +8,8 @@ namespace HoarderDB.Web.Endpoints;
 public static class ApiEndpoints
 {
     private const int MaxLookupChars = 4096;
+    /// <summary>Longest search term accepted (the UI input has the same maxlength).</summary>
+    public const int MaxSearchQueryChars = 256;
     /// <summary>Named fixed-window rate-limit policy for the search-start route (same pattern as AuthEndpoints.LoginLimiter).</summary>
     public const string SearchLimiter = "search";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -78,48 +80,61 @@ public static class ApiEndpoints
             return Results.Ok(new { name, word, found = lease.Db.Contains(word) });
         });
 
-        // "Contains" substring search. Exact match is answered inline (one point read, same as
-        // /lookup); the substring scan runs as its own background job (SearchRunner), never through
-        // JobQueue (would block unrelated imports/compacts) and never holding one AcquireRead lease
-        // for the whole scan (would stall a future write window). Rate-limited and gated to one
-        // search job at a time, both server-side (see SearchRunner).
+        // Scanning search (ignore-case exact and/or contains). Plain exact match is
+        // NOT served here: it is one point read, GET /lookup (no job, no rate limit). The scan runs as its own
+        // background job (SearchRunner), never through JobQueue (would block unrelated imports/compacts) and
+        // never holding one AcquireRead lease for the whole scan (would stall a write window). Matches stream
+        // to a server-owned temp file (SearchSpool), so there is no result ceiling. Rate-limited and gated to
+        // one search at a time, both server-side. Every field is validated here; the UI is only a convenience.
         api.MapPost("/dbs/{name}/search", (string name, SearchRequest req, IDbManager dbs, JobRegistry registry,
-            ILoggerFactory loggerFactory, ISearchProgressHook searchHook) =>
+            SearchSpool spool, IDiskSpace disk, ILoggerFactory loggerFactory, ISearchProgressHook searchHook) =>
         {
             var log = loggerFactory.CreateLogger("HoarderDB.Web.Jobs.SearchRunner");
             var query = req.Query ?? "";
+            bool ignoreCase = req.IgnoreCase == true, contains = req.Contains == true;
+            if (query.Length == 0) return Problem(400, "'query' is required.");
+            if (query.Length > MaxSearchQueryChars) return Problem(400, $"'query' must be at most {MaxSearchQueryChars} characters.");
+            if (!ignoreCase && !contains) return Problem(400, "Use GET /lookup for exact match.");
+            var spec = new SearchSpec(query, ignoreCase, contains);
             if (query.Length < SearchRunner.MinQueryLength)
-                return Problem(400, $"'query' must be at least {SearchRunner.MinQueryLength} characters.");
-            if (req.Min < 0 || req.Max < 0) return Problem(400, "min and max must be non-negative.");
-            if (req.Min > req.Max) return Problem(400, "min must be less than or equal to max.");
-            // Automatic length-narrowing: never scan entries shorter than the query itself, on top of
-            // whatever (wider) lower bound the caller asked for.
-            int min = Math.Max(query.Length, req.Min ?? 0);
-            int? max = req.Max;
-            int cap = Math.Clamp(req.Cap ?? SearchRunner.DefaultResultCap, 1, SearchRunner.MaxResultCap);
+                return Problem(400, $"'query' must contain at least {SearchRunner.MinQueryLength} characters.");
+            var (rangeMin, rangeMax) = SearchMatcher.EffectiveRange(spec);
 
-            bool exactFound;
-            using (var lease = dbs.AcquireRead(name)) exactFound = lease.Db.Contains(query);
+            using (dbs.AcquireRead(name)) { }   // 400/404/409 database semantics, same as every other read
 
             if (!SearchRunner.TryEnter())
                 return Results.Problem(statusCode: 409, title: "Search is busy.",
                     detail: "Another search is already running. Only one search runs at a time.");
-            var job = new Job(JobKind.Search, name, query) { Min = min, Max = max };
-            if (!job.TryStart())
+            Job? job = null;
+            bool handedOff = false;   // true once SearchRunner.Execute owns the slot (it releases it)
+            try
             {
-                // Unreachable for a freshly constructed job (TryStart only fails if already
-                // non-Queued), kept only as a safety net so the gate can never leak.
-                SearchRunner.Exit();
-                return Results.Problem(statusCode: 500, detail: "Could not start the search job.");
+                if (!spool.TryPrepare())
+                    return Problem(500, "Search results cannot be stored on this server.");
+                if (disk.FreeBytes(spool.Dir) is { } free && free < SearchSpool.ReserveBytes)
+                    return Problem(507, "Not enough free disk space for search results.");
+                spool.DisposeAll();   // a new search replaces the previous results (only one is ever useful)
+                job = new Job(JobKind.Search, name, query) { Min = rangeMin, Max = rangeMax };
+                job.Spool = spool.Create(job.Id);
+                if (!job.TryStart()) throw new InvalidOperationException();   // unreachable for a fresh job
+                registry.Add(job);
+                var dir = spool.Dir;
+                // Dedicated thread (LongRunning), not the pool: the scan is synchronous and can run for hours.
+                // Never through JobQueue.Enqueue either (see SearchRunner's doc comment).
+                _ = Task.Factory.StartNew(() => SearchRunner.Execute(job, spec, dbs, disk, dir, registry, log, job.Cts.Token, searchHook),
+                    CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                handedOff = true;
             }
-            registry.Add(job);
-            // Task.Run, not a bare call: SearchRunner.ExecuteAsync must never run inline on this
-            // request thread (its AcquireRead/Scan work is synchronous C# iteration with no `await`
-            // between chunks, so without Task.Run the whole first chunk - and any test/prod hook -
-            // would block the HTTP response itself). Never through JobQueue.Enqueue either (see
-            // SearchRunner's doc comment): this is a fire-and-forget background task of its own.
-            _ = Task.Run(() => SearchRunner.ExecuteAsync(job, query, ignoreCase: true, cap, dbs, registry, log, job.Cts.Token, searchHook));
-            return Results.Json(new { id = job.Id, exactFound, query, cap }, Json, statusCode: StatusCodes.Status202Accepted);
+            finally
+            {
+                if (!handedOff)
+                {
+                    job?.Dispose();   // never leak a spool file or the single-search slot on a refused/failed start
+                    SearchRunner.Exit();
+                }
+            }
+            return Results.Json(new { id = job.Id, query, ignoreCase, contains,
+                min = rangeMin, max = rangeMax }, Json, statusCode: StatusCodes.Status202Accepted);
         }).RequireRateLimiting(SearchLimiter);
 
         // Import history: reads the sidecar only (no DbLease), so it works while the db is importing.
@@ -201,7 +216,7 @@ public static class ApiEndpoints
 
     private const int MaxNameChars = 256;
     private sealed record CreateDbRequest(string? Name);
-    private sealed record SearchRequest(string? Query, int? Min, int? Max, int? Cap);
+    private sealed record SearchRequest(string? Query, bool? IgnoreCase, bool? Contains);
     private sealed record ImportCheckRequest(string? Sha256, string? Name, long? Size, int? Min, int? Max);
     private sealed record BackfillEntryRequest(string? Name, string? Sha256, long? SizeBytes, DateTimeOffset? ImportedAtUtc);
 

@@ -29,16 +29,15 @@ async function loadDbs(selectName) {
     sel.replaceChildren(...databases.map((n) => new Option(n, n)));
     if (selectName && databases.includes(selectName)) sel.value = selectName;
     else if (databases.includes(keep)) sel.value = keep;
-    show('dberror', databases.length ? '' : 'No databases found.');
+    show('dberror', '');
     onDbChanged();
   } catch (e) { fail('dberror', e); }
 }
 
 function updateExportAction() { $('export').action = '/api/dbs/' + enc(db()) + '/export'; }
 
-// Export file name: follows min/max until the user edits it; clearing it resumes following. The server
-// re-sanitises whatever is sent, so this is cosmetic. Button text is set with textContent only.
-let exportNameTouched = false;
+// Export file name: the button opens a small prompt pre-filled with the default (follows min/max). The
+// name goes to the server in the same `filename` form field; the server re-sanitises whatever is sent.
 function defaultExportName() {
   const mn = $('emin').value.trim(), mx = $('emax').value.trim();
   if (mn && mx) return 'wordlist-' + mn + '-' + mx + '.lst';
@@ -46,16 +45,18 @@ function defaultExportName() {
   if (mx) return 'wordlist-max' + mx + '.lst';
   return 'wordlist.lst';
 }
-function refreshExportUi() {
-  const file = $('efile');
-  if (!exportNameTouched) file.value = defaultExportName();
-  $('exportbtn').textContent = 'Export ' + (file.value.trim() || 'wordlist.lst');
-}
-$('emin').addEventListener('input', refreshExportUi);
-$('emax').addEventListener('input', refreshExportUi);
-$('efile').addEventListener('input', () => {
-  exportNameTouched = $('efile').value !== '';
-  refreshExportUi();
+$('export').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('exportname').value = defaultExportName();
+  $('exportdialog').showModal();
+  $('exportname').select();
+});
+$('exportcancel').addEventListener('click', () => { $('exportdialog').close(); });
+$('exportnameform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('efile').value = $('exportname').value.trim() || defaultExportName();
+  $('exportdialog').close();
+  $('export').submit();   // programmatic submit does not re-fire the submit event
 });
 
 // Cheap approximate size: refreshed on db selection and when a job finishes (no polling).
@@ -70,7 +71,6 @@ async function loadSize() {
 
 function onDbChanged() {
   updateExportAction();
-  refreshExportUi();
   show('stats', '');
   loadSize();
   loadHistory();
@@ -80,7 +80,13 @@ $('db').addEventListener('change', onDbChanged);
 
 // ---- import history (advisory record of past imports; all values are untrusted text) ----
 
-const fmtDate = (s) => (s ? new Date(s).toLocaleString() : '-');
+// DD/MM/YYYY HH:MM (24h, browser local time zone), independent of the browser locale.
+const p2 = (n) => String(n).padStart(2, '0');
+const fmtDay = (d) => p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear();
+const fmtDate = (s) => {
+  const d = s ? new Date(s) : null;
+  return d && !isNaN(d) ? fmtDay(d) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) : '-';
+};
 
 let histEntries = [];
 let histSort = { key: 'date', dir: 'desc' };   // default: newest first, as the server returns it
@@ -183,10 +189,10 @@ const curUnits = () => (batch && batch.cur ? batch.cur.up + batch.cur.imp : 0);
 function tickTimer() {
   if (!batch) return;
   const now = Date.now();
-  let text = 'Elapsed ' + fmtClock(now - batch.fileStart) + ' (batch ' + fmtClock(now - batch.startedAt) + ')';
+  let text = 'Elapsed ' + fmtClock(now - batch.fileStart);
   if (batch.paused) {
     batch.samples = [];   // the wait must not drag the rate down
-    text += ' - paused, waiting for the server';
+    text += ' \u00b7 paused, waiting for the server';
   } else {
     const u = batch.doneUnits + curUnits();
     const s = batch.samples;
@@ -195,11 +201,10 @@ function tickTimer() {
     while (s.length > 2 && now - s[0].t > RATE_WINDOW_MS) s.shift();
     const span = now - s[0].t;
     const rate = span >= RATE_MIN_SPAN_MS ? (u - s[0].u) / (span / 1000) : 0;
-    if (!(rate > 0)) text += ' - calculating time left...';
+    if (!(rate > 0)) text += ' \u00b7 calculating time left...';
     else {
-      const fileLeft = (2 * batch.cur.size - curUnits()) / rate;
       const batchLeft = (2 * batch.totalBytes - u) / rate;
-      text += ' - ' + fmtBytes(rate) + '/s - file ~' + fmtEta(Math.max(0, fileLeft)) + ' left - about ' + fmtEta(Math.max(0, batchLeft)) + ' left (batch)';
+      text += ' \u00b7 ' + fmtBytes(rate) + '/s \u00b7 about ' + fmtEta(Math.max(0, batchLeft)) + ' left';
     }
   }
   show('jobtimer', text);
@@ -286,13 +291,24 @@ const verbing = (j) => (j.kind === 'compact' ? 'compaction' : 'import');
 function renderBanner() {
   const r = runningJob();
   const b = $('banner');
-  if (!r) { b.hidden = true; return; }
-  b.textContent = r.kind === 'compact'
-    ? 'Maintenance in progress: database ' + r.db + ' is being compacted. Search and imports are unavailable until it finishes.'
-    : 'Import in progress: database ' + r.db + ' is being imported. Search of it is unavailable until it finishes.';
+  const sum = $('importsummary');
+  const clearNotice = () => { if (sum.dataset.kind === 'notice') { sum.textContent = ''; sum.className = ''; delete sum.dataset.kind; } };
+  if (!r) { b.hidden = true; clearNotice(); return; }
   const waiting = activeJobs().filter((j) => j.status === 'queued').length;
-  if (waiting) b.textContent += ' ' + waiting + ' job' + (waiting === 1 ? '' : 's') + ' waiting in the queue.';
-  b.hidden = false;
+  const queued = waiting ? ' ' + waiting + ' job' + (waiting === 1 ? '' : 's') + ' waiting in the queue.' : '';
+  if (r.kind === 'compact') {
+    b.textContent = 'Maintenance in progress: database ' + r.db + ' is being compacted. Search and imports are unavailable until it finishes.' + queued;
+    b.hidden = false;
+    clearNotice();
+    return;
+  }
+  // The import notice lives under the upload output (the same spot as the batch summary), not in the
+  // top banner. A finished batch summary wins and is never overwritten.
+  b.hidden = true;
+  if (sum.dataset.kind === 'summary') return;
+  sum.textContent = 'Import in progress: database ' + r.db + ' is being imported. Search of it is unavailable until it finishes.' + queued;
+  sum.className = 'hint';
+  sum.dataset.kind = 'notice';
 }
 
 async function pollJobs() {
@@ -353,8 +369,13 @@ function renderJob(j) {
 }
 
 function closeEvents() { if (events) { events.close(); events = null; } }
-// During a batch the Upload button stays usable: it appends more files to the queue.
-function setBusy(b) { $('uploadbtn').disabled = b && !batch; $('uploadbtn').textContent = batch ? 'Upload to queue' : 'Upload and import'; }
+// During a batch the file button stays usable: it appends more files to the queue.
+function setBusy(b) {
+  const off = b && !batch;
+  $('ifile').disabled = off;
+  $('filebtn').classList.toggle('disabled', off);
+  $('filebtn').textContent = batch ? 'Upload to queue' : 'Upload and import';
+}
 
 function track(id) {
   closeEvents();
@@ -483,17 +504,16 @@ async function runBatch(dbName, files) {
   batch = { db: dbName, queue: files.slice(), index: 0, total: files.length, cancelled: false, xhr: null, startedAt: Date.now(), fileStart: Date.now(),
     totalBytes: files.reduce((n, f) => n + f.size, 0), doneUnits: 0, cur: { size: 0, up: 0, imp: 0 }, samples: [], paused: false };
   setBusy(true);
+  { const s = $('importsummary'); s.textContent = ''; s.className = ''; delete s.dataset.kind; }   // a new batch replaces the old summary or notice
   if (timerId) clearInterval(timerId);
   timerId = setInterval(tickTimer, 1000);
   tickTimer();
   const failures = [];
   const skipped = [];
   let imported = 0;
-  const when = (m) => (m && m.importedAt ? new Date(m.importedAt).toLocaleDateString() : 'earlier');
-  const send = (file, force) => {
+  const send = (file) => {
     const fd = new FormData();   // order matters: text fields first, the file last
     fd.append('db', dbName);
-    if (force) fd.append('force', 'true');
     fd.append('file', file, file.name);
     return uploadXhr(fd, (l, t) => renderUpload(file.name, l, t || file.size), (x) => { batch.xhr = x; });
   };
@@ -504,23 +524,15 @@ async function runBatch(dbName, files) {
   // or failed for a real reason); throws a transient / interrupted error so the caller can wait and retry.
   const processFile = async (file) => {
     renderUpload(file.name, 0, file.size);
-    // Advisory pre-check by name and size: saves a pointless transfer; the hash check after the upload is authoritative.
-    let force = false;
-    try {
-      const chk = await post('/api/dbs/' + enc(dbName) + '/imports/check', { name: file.name, size: file.size });
-      if (chk.duplicate) {
-        if (!confirm('"' + file.name + '" looks already imported on ' + when(chk.duplicate) + '. Upload anyway?')) { skipped.push(file.name); return; }
-        force = true;
-      }
-    } catch (e) { if (e.message === 'signed out' || isTransient(e)) throw e; /* otherwise the check is only a hint */ }
+    // No client-side skip: the server's SHA-256 check decides after the upload. A true duplicate answers 409
+    // already_imported, which is skipped silently (no prompt, no force) and listed in the batch summary.
     let res;
-    try { res = await send(file, force); }
+    try { res = await send(file); }
     catch (e) {
       if (!(e.status === 409 && e.data && e.data.code === 'already_imported')) throw e;
       batch.xhr = null;
-      if (!confirm('"' + file.name + '" has identical content to an import on ' + when(e.data.duplicateOf) + '. Import it again anyway?')) { skipped.push(file.name); return; }
-      renderUpload(file.name, 0, file.size);
-      res = await send(file, true);
+      skipped.push(file.name);
+      return;
     }
     const { id } = res;
     batch.xhr = null;
@@ -569,12 +581,16 @@ async function runBatch(dbName, files) {
   show('jobwait', '');
   if (!currentJob) $('job').hidden = true;
   let msg = imported + ' of ' + b.total + ' imported';
-  if (skipped.length) msg += '; ' + skipped.length + ' skipped (already imported): ' + skipped.join(', ');
+  if (skipped.length) msg += '; ' + skipped.length + ' already imported, skipped: ' + skipped.join(', ');
   if (b.cancelled) msg += '; cancelled after file ' + b.index + ' of ' + b.total + ' (remaining skipped)';
   if (failures.length) msg += '; ' + failures.length + ' failed: ' + failures.join('; ');
   if (gaveUp.length) msg += '; ' + gaveUp.length + ' failed after retries (server unavailable): ' + gaveUp.join('; ');
   if (aborted) msg += '; stopped, ' + b.queue.length + ' file' + (b.queue.length === 1 ? '' : 's') + ' not attempted';
-  show('importerror', msg);
+  const summary = $('importsummary');
+  summary.textContent = b.cancelled ? 'File upload cancelled' : msg;
+  // Green only when everything went through; any failure/stop keeps the error colour.
+  summary.dataset.kind = 'summary';
+  summary.className = (failures.length || gaveUp.length || aborted || b.cancelled) ? 'error' : 'success';
   loadDbs();
 }
 
@@ -601,23 +617,17 @@ function renderQueue() {
   }));
 }
 
-function updateFileSummary() {
-  const f = $('ifile').files;
-  $('ifilesummary').textContent = !f.length ? 'No files selected' : f.length === 1 ? f[0].name : f.length + ' files selected';
-}
-$('ifile').addEventListener('change', updateFileSummary);
-
-$('uploadbtn').addEventListener('click', () => {
+// Choosing files starts the upload/import straight away (one button instead of choose + upload).
+$('ifile').addEventListener('change', () => {
   const dbName = db();
   const files = Array.from($('ifile').files);
+  $('ifile').value = '';   // so picking the same file again still fires change
   if (!dbName) return show('importerror', 'Select or create a database first.');
-  if (!files.length) return show('importerror', 'Choose a file to upload.');
+  if (!files.length) return;
   if (batch && batch.cancelled) return show('importerror', 'The batch is being cancelled; wait for it to stop.');
   // Simplest safe rule: files added mid-batch go to the running batch's database only.
   if (batch && dbName !== batch.db) return show('importerror', 'Uploads are running into "' + batch.db + '"; select that database to add more files.');
   show('importerror', '');
-  $('ifile').value = '';
-  updateFileSummary();
   if (batch) { batch.queue.push(...files); batch.total += files.length; batch.totalBytes += files.reduce((n, f) => n + f.size, 0); renderQueue(); return; }
   runBatch(dbName, files);
 });
@@ -641,14 +651,52 @@ $('jobcancel').addEventListener('click', async () => {
   } catch (e) { /* the panel just starts idle */ }
 })();
 
-// ---- "contains" search: exact match answered inline; substring match is a background job ----
+// ---- search: exact = one point read (GET /lookup); Ignore case / Contains = a background scan job ----
 
-const SEARCH_MIN_QUERY_LENGTH = 4;   // mirrors SearchRunner.MinQueryLength; the server enforces this regardless
+const MATCH_PAGE = 5000;
+const SEARCH_MIN_CHARS = 4;               // mirrors SearchMatcher.MinChars; the server enforces this regardless
+const SEARCH_DISPLAY_CAP = 100000;        // lines shown in the window; "Download all" gets the complete list
 let searchEvents = null;
 let currentSearchJob = null;
 let currentSearchId = null;   // known as soon as the start request returns, even before the first SSE frame
+let searchShown = 0;          // matches already appended to the results window
+let searchFetching = false;   // one catch-up loop at a time
+let searchBusy = false;   // a lookup/scan is in flight: the form is locked until it ends
 
 function closeSearchEvents() { if (searchEvents) { searchEvents.close(); searchEvents = null; } }
+
+function setSearchBusy(busy) {
+  searchBusy = busy;
+  for (const id of ['squery', 'signore', 'scontains', 'searchbtn']) $(id).disabled = busy;
+}
+
+// Matches are fetched in pages after the last one shown and appended as text (never innerHTML), so the
+// SSE frames stay small. The window stops at SEARCH_DISPLAY_CAP lines; the rest is only in "Download all".
+async function pullMatches(id) {
+  if (searchFetching) return;
+  searchFetching = true;
+  try {
+    while (id === currentSearchId && searchShown < SEARCH_DISPLAY_CAP) {
+      const page = await api('/api/jobs/' + enc(id) + '/matches?after=' + searchShown + '&limit=' + Math.min(MATCH_PAGE, SEARCH_DISPLAY_CAP - searchShown));
+      if (id !== currentSearchId || !page.items.length) break;
+      const box = $('searchresults');
+      const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+      box.append(document.createTextNode(page.items.join('\n') + '\n'));
+      searchShown = page.next;
+      if (stick) box.scrollTop = box.scrollHeight;
+    }
+  } catch (e) { /* the next frame retries; a 410 just means the results were replaced */ }
+  finally { searchFetching = false; }
+  if (currentSearchJob) renderSearchNote(currentSearchJob);
+}
+
+function renderSearchNote(j) {
+  const parts = [];
+  if (j.note) parts.push(j.note);
+  if (j.matchedCount > SEARCH_DISPLAY_CAP)
+    parts.push('Showing the first ' + fmt(SEARCH_DISPLAY_CAP) + ' of ' + fmt(j.matchedCount) + ' matches. Use "Download all" for the complete list.');
+  show('searchnote', parts.join(' '));
+}
 
 function renderSearchJob(j) {
   currentSearchJob = j;
@@ -657,21 +705,25 @@ function renderSearchJob(j) {
   $('searchtitle').textContent = 'Searching ' + j.db + ' for "' + j.source + '"';
   const st = $('searchstatus'); st.textContent = j.status; st.className = 'badge ' + j.status;
   const bar = $('searchbar');
+  bar.hidden = false;
   const done = TERMINAL.includes(j.status);
   if (done) { bar.max = 100; bar.value = 100; } else bar.removeAttribute('value');   // indeterminate: no percentage, just a counter below
   $('searchstats').replaceChildren(
-    ...[['Scanned', fmt(j.scannedCount) + ' entries'], ['Found', fmt(j.matchedCount) + (j.capped ? ' (stopped at the cap)' : '')], ['Elapsed', fmtElapsed(j)]]
+    ...[['Scanned', fmt(j.scannedCount) + ' entries'], ['Found', fmt(j.matchedCount)], ['Elapsed', fmtElapsed(j)]]
       .flatMap(([k, v]) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); dd.textContent = v; return [dt, dd]; }));
   show('searchjoberror', j.error || '');
-  const list = $('searchresults');
-  list.replaceChildren(...(j.matches || []).map((w) => { const li = document.createElement('li'); li.textContent = w; return li; }));   // textContent only: never innerHTML
-  if (j.capped) {
-    const li = document.createElement('li');
-    li.textContent = 'Showing the first ' + j.matches.length + ' of at least ' + fmt(j.matchedCount) + ' matches.';
-    list.append(li);
-  }
+  if (searchShown < Math.min(j.matchedCount, SEARCH_DISPLAY_CAP)) pullMatches(j.id);
+  const n = fmt(j.matchedCount) + (j.matchedCount === 1 ? ' match' : ' matches');
+  if (!done) show('searchexact', j.matchedCount ? 'Searching… ' + n + ' so far' : 'Searching…');
+  else if (j.status === 'completed') show('searchexact', j.matchedCount ? n : j.source + ' doesn\'t exist in the database');
+  else if (j.status === 'cancelled') show('searchexact', 'Cancelled.');
+  else show('searchexact', '');
+  renderSearchNote(j);
   $('searchcancel').hidden = done;
-  if (done) closeSearchEvents();
+  const dl = $('searchdownload');
+  dl.hidden = !(done && j.status === 'completed' && j.matchedCount > 0);
+  if (!dl.hidden) dl.href = '/api/jobs/' + enc(j.id) + '/matches/download';
+  if (done) { closeSearchEvents(); setSearchBusy(false); }
 }
 
 function trackSearch(id) {
@@ -685,23 +737,55 @@ function trackSearch(id) {
       const j = await api('/api/jobs/' + enc(id));
       renderSearchJob(j);
       if (!TERMINAL.includes(j.status)) setTimeout(() => trackSearch(id), 2000);
-    } catch (e) { fail('searchjoberror', e); closeSearchEvents(); }
+    } catch (e) { fail('searchjoberror', e); closeSearchEvents(); setSearchBusy(false); }
   };
 }
 
-$('searchbtn').addEventListener('click', async () => {
+function resetSearchView(title) {
+  closeSearchEvents();
+  currentSearchJob = null;
+  currentSearchId = null;
+  searchShown = 0;
+  $('searchresults').textContent = '';
+  $('searchjob').hidden = false;
+  $('searchtitle').textContent = title;
+  show('searchjoberror', ''); show('searchnote', ''); show('searchexact', '');
+  $('searchdownload').hidden = true;
+}
+
+// A <form> submit covers both the button and Enter in the field (one handler, no double-submit).
+$('searchform').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if ($('searchbtn').disabled) return;
   const dbName = db();
   const query = $('squery').value;
+  const ignoreCase = $('signore').checked, contains = $('scontains').checked;
   show('searcherror', '');
   if (!dbName) { show('searcherror', 'Select a database first.'); return; }
-  if (query.length < SEARCH_MIN_QUERY_LENGTH) { show('searcherror', 'Enter at least ' + SEARCH_MIN_QUERY_LENGTH + ' characters.'); return; }
+  if (!query) { show('searcherror', 'Enter something to search for.'); return; }
+  const scanning = ignoreCase || contains;
+  if (scanning && query.length < SEARCH_MIN_CHARS) { show('searcherror', 'Enter at least ' + SEARCH_MIN_CHARS + ' characters.'); return; }
+  setSearchBusy(true);
   try {
-    const res = await post('/api/dbs/' + enc(dbName) + '/search', { query });
+    if (!scanning) {
+      // Exact, case-sensitive: one point read, no job.
+      resetSearchView('Looking up in ' + dbName + ': "' + query + '"');
+      $('searchstatus').textContent = ''; $('searchstatus').className = 'badge';
+      $('searchbar').hidden = true; $('searchstats').replaceChildren(); $('searchcancel').hidden = true;
+      const r = await api('/api/dbs/' + enc(dbName) + '/lookup?word=' + enc(query));
+      if (r.found) { show('searchexact', '1 match'); $('searchresults').textContent = r.word + '\n'; }
+      else show('searchexact', query + ' doesn\'t exist in the database');
+      setSearchBusy(false);
+      return;
+    }
+    resetSearchView('Searching ' + dbName + ' for "' + query + '"');
+    $('searchcancel').hidden = false;
+    show('searchexact', 'Searching…');
+    const body = { query, ignoreCase, contains };
+    const res = await post('/api/dbs/' + enc(dbName) + '/search', body);
     currentSearchId = res.id;
-    $('searchjob').hidden = false;
-    show('searchexact', 'Exact match: ' + (res.exactFound ? 'found.' : 'not found.') + ' Scanning the rest of the database for "' + res.query + '" in the background...');
     trackSearch(res.id);
-  } catch (e) { fail('searcherror', e); }
+  } catch (err) { fail('searcherror', err); $('searchjob').hidden = true; setSearchBusy(false); }
 });
 
 $('searchcancel').addEventListener('click', async () => {

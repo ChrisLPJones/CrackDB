@@ -59,6 +59,8 @@ services.AddSingleton<IncomingPathResolver>();
 services.TryAddSingleton<IDiskSpace, DriveDiskSpace>();
 services.AddSingleton<IImportHistory, ImportHistory>();
 services.AddSingleton<JobRegistry>();
+services.AddSingleton<SearchSpool>();
+services.AddHostedService(sp => sp.GetRequiredService<SearchSpool>());   // startup/shutdown wipe + 1 h expiry of search results
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
 services.TryAddSingleton<ISearchProgressHook, NoopSearchProgressHook>();
 services.AddSingleton<JobQueue>();
@@ -219,6 +221,7 @@ internal sealed class ApiExceptionHandler(IProblemDetailsService problems, ILogg
             InvalidSourcePathException => (400, "Invalid source path."),
             SourceNotFoundException => (404, "Source file not found."),
             JobNotFoundException => (404, "Job not found."),
+            SearchResultsGoneException => (410, "Results are no longer available."),
             IncomingNotConfiguredException => (404, "Server-side import is not configured."),
             UploadTooLargeException => (413, "Upload exceeds the size limit."),
             BadHttpRequestException b => (b.StatusCode, "Bad request."),

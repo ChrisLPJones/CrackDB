@@ -54,10 +54,8 @@
     <p class="hint">Uploads one or more wordlists from this browser into the currently selected database, one at a time (each file is imported before the next is uploaded). You can pick more files while an upload is running; they are added to the queue for the same database. Reads of that database are refused while it is importing. Duplicates are removed automatically. The browser upload imports every line (no length filter).</p>
     <div class="filepick">
       <input id="ifile" class="visually-hidden" type="file" multiple>
-      <label for="ifile" class="filebtn">Choose files&hellip;</label>
-      <span id="ifilesummary" class="hint" aria-live="polite">No files selected</span>
+      <label for="ifile" id="filebtn" class="filebtn primary">Upload and import</label>
     </div>
-    <div class="actions"><button id="uploadbtn" class="primary" type="button">Upload and import</button></div>
     <div id="queuebox" class="queuebox" hidden>
       <strong id="queuehead">Waiting in the queue</strong>
       <ul id="queuelist"></ul>
@@ -74,24 +72,34 @@
       <p id="joberror" class="error" role="alert"></p>
       <div class="actions"><button id="jobcancel" type="button">Cancel</button></div>
     </div>
+    <p id="importsummary" role="status"></p>
   </section>
 
   <section id="search-panel">
     <h2>Search</h2>
-    <p class="hint">Finds every stored password that contains the text anywhere (case-insensitive), not just an exact match. This scans the database in the background and can take a while on a large one; only one search runs at a time, server-wide.</p>
-    <label for="squery">Password or substring (at least 4 characters)</label>
-    <input id="squery" type="text" autocomplete="off" spellcheck="false" maxlength="256">
-    <div class="actions"><button id="searchbtn" class="primary" type="button">Search</button></div>
+    <p class="hint">By default this checks whether the exact password is stored (case-sensitive). Tick <em>Ignore case</em> and/or <em>Contains</em> to scan the database in the background instead; that can take a while on a large database, and only one scan runs at a time, server-wide. Scans need at least 4 characters.</p>
+    <form id="searchform">
+      <label for="squery">Password or text to find</label>
+      <input id="squery" type="text" autocomplete="off" spellcheck="false" maxlength="256">
+      <div class="searchopts">
+        <div class="toggles" role="group" aria-label="Search options">
+          <label class="pill"><input id="signore" type="checkbox"><span>Ignore case</span></label>
+          <label class="pill"><input id="scontains" type="checkbox"><span>Contains</span></label>
+        </div>
+      </div>
+      <div class="actions"><button id="searchbtn" class="primary" type="submit">Search</button></div>
+    </form>
     <p id="searcherror" class="error" role="alert"></p>
 
     <div id="searchjob" class="job" hidden>
       <div class="jobhead"><strong id="searchtitle"></strong><span id="searchstatus" class="badge"></span></div>
       <p id="searchexact" class="hint"></p>
+      <p id="searchnote" class="hint"></p>
       <progress id="searchbar"></progress>
       <dl id="searchstats"></dl>
       <p id="searchjoberror" class="error" role="alert"></p>
-      <div class="actions"><button id="searchcancel" type="button">Cancel</button></div>
-      <ul id="searchresults" class="result searchresults"></ul>
+      <pre id="searchresults" class="searchresults" tabindex="0" aria-label="Matches"></pre>
+      <div class="actions"><button id="searchcancel" class="danger" type="button">Cancel</button><a id="searchdownload" class="filebtn primary" href="#" download="matches.txt" hidden>Download all</a></div>
     </div>
   </section>
 
@@ -102,12 +110,20 @@
         <div><label for="emin">Min length</label><input id="emin" name="min" type="number" min="0"></div>
         <div><label for="emax">Max length</label><input id="emax" name="max" type="number" min="0"></div>
       </div>
-      <div>
-        <label for="efile">Output file name</label>
-        <input id="efile" name="filename" type="text" maxlength="100" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="actions"><button id="exportbtn" class="primary" type="submit">Export wordlist.lst</button></div>
+      <input id="efile" name="filename" type="hidden">
+      <div class="actions"><button id="exportbtn" class="primary" type="submit">Export wordlist</button></div>
     </form>
+    <dialog id="exportdialog">
+      <form id="exportnameform">
+        <h2>Export wordlist</h2>
+        <label for="exportname">Output file name</label>
+        <input id="exportname" type="text" maxlength="100" autocomplete="off" spellcheck="false">
+        <div class="actions">
+          <button id="exportgo" class="primary" type="submit">Export</button>
+          <button id="exportcancel" type="button">Cancel</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <section id="history-panel" class="collapsible">

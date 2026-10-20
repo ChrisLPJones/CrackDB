@@ -15,7 +15,7 @@ public sealed class NoopSearchProgressHook : ISearchProgressHook
 }
 
 /// <summary>
-/// Executes a "contains" substring search as its own lightweight scanning path - deliberately never
+/// Executes a scanning search (ignore-case exact, or contains) as its own lightweight scanning path - deliberately never
 /// through <see cref="JobQueue"/> (enqueuing there would occupy its one-job-at-a-time slot for the
 /// whole scan and delay every unrelated import/compact behind it) and never by holding one
 /// <see cref="IDbManager.AcquireRead"/> lease for the whole scan (that would itself stall a future
@@ -27,12 +27,12 @@ public sealed class NoopSearchProgressHook : ISearchProgressHook
 /// </summary>
 public static class SearchRunner
 {
-    /// <summary>Shown by default; see <see cref="MaxResultCap"/> for the hard ceiling.</summary>
-    public const int DefaultResultCap = 500;
-    /// <summary>Hard ceiling, not user-raisable past this: bounds worst-case scan + SSE-frame cost.</summary>
-    public const int MaxResultCap = 2000;
-    /// <summary>Below this many characters a substring scan is refused outright (enforced server-side).</summary>
-    public const int MinQueryLength = 4;
+    /// <summary>Below this many characters a scanning search is refused outright (enforced server-side).</summary>
+    public const int MinQueryLength = SearchMatcher.MinChars;
+
+    /// <summary>A write window (import/compact) on the searched db holds the single search slot while we wait; give up after this.</summary>
+    public static TimeSpan BusyTimeout { get; set; } = TimeSpan.FromMinutes(30);
+    public static TimeSpan BusyRetry { get; set; } = TimeSpan.FromMilliseconds(250);
 
     // A few thousand keys or ~200ms, whichever comes first, per AcquireRead lease: frequent enough
     // that a pending write window on this job's own db waits at most about one chunk. Conservative by
@@ -44,7 +44,7 @@ public static class SearchRunner
 
     // Independent of JobQueue's channel and of JobEndpoints.UploadGate: one search job at a time,
     // globally (not per-db) - the simplest IO-contention story, and the one real server-side lever
-    // against a sustained full-db scan alongside the result cap and minimum query length.
+    // against a sustained full-db scan alongside the disk reserve and minimum query length.
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     /// <summary>Non-blocking: true if this request now owns the single search slot.</summary>
@@ -54,14 +54,17 @@ public static class SearchRunner
     /// <summary>
     /// Runs the scan to completion, cancellation or failure, then releases the single-search gate and
     /// marks the job finished in the registry. SearchRunner owns the job end-to-end - it is never
-    /// enqueued on <see cref="JobQueue"/>, so nothing else will ever clean it up.
+    /// enqueued on <see cref="JobQueue"/>, so nothing else will ever clean it up. Synchronous on purpose:
+    /// the caller runs it on a dedicated (LongRunning) thread, because a scan can last hours and must not
+    /// occupy a thread-pool thread. Results go to <c>job.Spool</c> (disk); cancelled and failed jobs delete
+    /// it, completed ones keep it for review until the next search or the spool's TTL.
     /// </summary>
-    public static async Task ExecuteAsync(Job job, string query, bool ignoreCase, int resultCap,
-        IDbManager dbs, JobRegistry registry, ILogger log, CancellationToken ct, ISearchProgressHook? hook = null)
+    public static void Execute(Job job, SearchSpec spec, IDbManager dbs, IDiskSpace disk, string spoolDir,
+        JobRegistry registry, ILogger log, CancellationToken ct, ISearchProgressHook? hook = null)
     {
         try
         {
-            await ScanAsync(job, query, ignoreCase, resultCap, dbs, ct, hook ?? new NoopSearchProgressHook());
+            Scan(job, spec, dbs, disk, spoolDir, ct, hook ?? new NoopSearchProgressHook());
             job.Finish(ct.IsCancellationRequested ? JobStatus.Cancelled : JobStatus.Completed);
         }
         catch (OperationCanceledException) { job.Finish(JobStatus.Cancelled); }
@@ -74,24 +77,39 @@ public static class SearchRunner
             {
                 DbNotFoundException => "Database not found.",
                 DbBusyException => "Database is busy.",
+                BusyTimeoutException => "The database stayed busy for too long; the search was stopped.",
                 _ => "The search failed. See the server log.",
             });
         }
         finally
         {
+            try
+            {
+                var spool = job.Spool;
+                if (spool is not null)
+                {
+                    if (job.Status == JobStatus.Completed) spool.CompleteWriting(DateTimeOffset.UtcNow);
+                    else spool.Dispose();   // cancelled / failed: discard the results
+                }
+            }
+            catch (Exception ex) { log.LogWarning(ex, "Search job {Id} spool cleanup failed", job.Id); }
             job.Cts.Dispose();
             registry.MarkFinished(job);
             Exit();
         }
     }
 
-    private static async Task ScanAsync(Job job, string query, bool ignoreCase, int resultCap, IDbManager dbs,
+    private sealed class BusyTimeoutException : Exception;
+
+    private static void Scan(Job job, SearchSpec spec, IDbManager dbs, IDiskSpace disk, string spoolDir,
         CancellationToken ct, ISearchProgressHook hook)
     {
-        var matches = new List<string>();
+        var spool = job.Spool ?? throw new InvalidOperationException("Search job has no result spool.");
+        var (min, max) = SearchMatcher.EffectiveRange(spec);
+        var isMatch = SearchMatcher.Compile(spec);
         long scanned = 0;
         string? cursor = null;
-        var cmp = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        DateTime? busySince = null;
 
         while (true)
         {
@@ -102,23 +120,29 @@ public static class SearchRunner
             {
                 // A write window started on this db meanwhile: back off and retry from the same
                 // cursor - symmetric with how an ordinary read already treats a busy db, just retried
-                // instead of surfaced to a client.
-                await Task.Delay(250, ct);
+                // instead of surfaced to a client. While waiting, this holds the one server-wide search
+                // slot, so give up after BusyTimeout rather than lock searches on other dbs out forever.
+                busySince ??= DateTime.UtcNow;
+                if (DateTime.UtcNow - busySince > BusyTimeout) throw new BusyTimeoutException();
+                job.Note = "Paused: database is busy (import or compact in progress).";
+                ct.WaitHandle.WaitOne(BusyRetry);
                 continue;
             }
+            if (busySince is not null) { busySince = null; job.Note = null; }
 
+            var chunkMatches = new List<string>();
             bool brokeEarly = false;
             var sw = Stopwatch.StartNew();
             try
             {
                 int inChunk = 0;
-                foreach (var word in lease.Db.Scan(job.Min, job.Max, cursor))
+                foreach (var word in lease.Db.Scan(min, max, cursor))
                 {
                     cursor = word;
                     scanned++;
-                    if (matches.Count < resultCap && word.Contains(query, cmp)) matches.Add(word);
+                    if (isMatch(word)) chunkMatches.Add(word);
                     inChunk++;
-                    if (matches.Count >= resultCap || inChunk >= ChunkKeys || sw.Elapsed >= ChunkBudget)
+                    if (inChunk >= ChunkKeys || sw.Elapsed >= ChunkBudget)
                     {
                         brokeEarly = true;
                         break;
@@ -128,11 +152,21 @@ public static class SearchRunner
             }
             finally { lease.Dispose(); }
 
+            // Spool IO happens after the lease is released, so a write window never waits on the disk.
+            ct.ThrowIfCancellationRequested();
+            if (disk.FreeBytes(spoolDir) is { } free && free < SearchSpool.ReserveBytes)
+            {
+                // The DB shares this volume and compaction needs headroom: keep what we have and stop.
+                job.SetScanned(scanned);
+                job.SetMatched(spool.Count, capped: true);
+                job.Note = "Stopped: low disk space; " + spool.Count.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " matches kept.";
+                return;
+            }
+            spool.Append(chunkMatches);
             job.SetScanned(scanned);
-            job.SetMatches(new List<string>(matches), matches.Count, matches.Count >= resultCap);
+            job.SetMatched(spool.Count, capped: false);
             hook.OnChunk(job.DbName, scanned);   // test seam: fires only after the lease is released
 
-            if (matches.Count >= resultCap) return;   // cap reached: stop scanning (bounds worst-case cost)
             if (!brokeEarly) return;                   // the iterator ran out: true end of the key range
         }
     }

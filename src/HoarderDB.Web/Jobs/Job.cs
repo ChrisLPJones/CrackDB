@@ -12,8 +12,9 @@ public sealed record JobSnapshot(
     long EstCountBefore, long EstCountAfter, long EstNewEntries, int Errors,
     DateTimeOffset QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, string? Error,
     string? Note = null, ImportMatch? DuplicateOf = null,
-    // Search-only fields (unused/zero for Import/Compact). Matches is capped server-side
-    // (see SearchRunner.ResultCap) so the SSE frame never grows unboundedly.
+    // Search-only fields (unused/zero for Import/Compact). Matches is always null in a snapshot: the
+    // match list can be huge, so it is paged out of the spool (GET /api/jobs/{id}/matches) instead
+    // of riding every SSE frame. Capped means a server limit (low disk) stopped the scan; see Note.
     long ScannedCount = 0, long MatchedCount = 0, IReadOnlyList<string>? Matches = null, bool Capped = false);
 
 /// <summary>
@@ -34,7 +35,7 @@ public sealed class Job
     private ImportMatch? _duplicateOf;
     private bool _forcedOverride;
     private long _scanned, _matched;
-    private List<string>? _matches;
+    private MatchSpool? _spool;
     private bool _capped;
 
     public Job(JobKind kind, string dbName, string? label)
@@ -112,14 +113,17 @@ public sealed class Job
     public void SetScanned(long scanned) { lock (_gate) _scanned = scanned; }
 
     /// <summary>
-    /// Replaces the search job's result set. <paramref name="matches"/> is already capped by the
-    /// caller (<see cref="SearchRunner"/>'s ResultCap); this never grows it further, so the SSE frame
-    /// stays bounded no matter how long the scan runs.
+    /// The on-disk match list of a search job (null for other kinds). Memory per job is only a sparse
+    /// index; the match text lives in the spool file, so there is no result ceiling.
     /// </summary>
-    public void SetMatches(List<string> matches, long matchedCount, bool capped)
-    {
-        lock (_gate) { _matches = matches; _matched = matchedCount; _capped = capped; }
-    }
+    public MatchSpool? Spool { get { lock (_gate) return _spool; } set { lock (_gate) _spool = value; } }
+
+    /// <summary>Publishes the running match count after a chunk was committed to the spool.
+    /// Capped means a server limit (e.g. low disk) stopped the scan early; the reason goes in Note.</summary>
+    public void SetMatched(long matched, bool capped) { lock (_gate) { _matched = matched; _capped = capped; } }
+
+    /// <summary>Frees job-held resources (the spool file). Idempotent; called on registry eviction.</summary>
+    public void Dispose() => Spool?.Dispose();
 
     public void Finish(JobStatus terminal, string? error = null)
     {
@@ -140,6 +144,6 @@ public sealed class Job
                 _status.ToString().ToLowerInvariant(), _lines, _bytes, _bytesTotal,
                 _before, _after, Math.Max(0, _after - _before), _errors,
                 QueuedAt, _started, _ended, _error, _note, _duplicateOf,
-                _scanned, _matched, _matches, _capped);
+                _scanned, _matched, null, _capped);
     }
 }
