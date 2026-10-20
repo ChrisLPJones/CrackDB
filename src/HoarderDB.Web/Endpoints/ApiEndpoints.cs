@@ -12,6 +12,8 @@ public static class ApiEndpoints
     public const int MaxSearchQueryChars = 256;
     /// <summary>Named fixed-window rate-limit policy for the search-start route (same pattern as AuthEndpoints.LoginLimiter).</summary>
     public const string SearchLimiter = "search";
+    /// <summary>Rate-limit policy for the pre-upload duplicate check (one or two calls per queued file).</summary>
+    public const string SeenLimiter = "importseen";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public static void MapApi(this IEndpointRouteBuilder app)
@@ -178,6 +180,17 @@ public static class ApiEndpoints
             });
         });
 
+        // Pre-upload duplicate check for the browser: booleans only (never names, hashes or history rows). Reads the
+        // sidecar only (no DbLease), so it answers while the db is importing; the post-upload SHA-256 409 stays the backstop.
+        api.MapPost("/dbs/{name}/imports/seen", (string name, ImportSeenRequest? req, DataRootResolver data, IImportHistory history) =>
+        {
+            data.ResolveExisting(name);                       // 400 bad name / 404 missing
+            if (req?.Size is null or < 0) return Problem(400, "size must be a non-negative integer.");
+            if (req.Sha256 != null && !ImportHistory.IsValidSha256(req.Sha256)) return Problem(400, "sha256 must be 64 hexadecimal characters.");
+            var (sizeMatch, duplicate) = history.Seen(name, req.Size.Value, req.Sha256);
+            return Results.Ok(new { sizeMatch, duplicate });
+        }).RequireRateLimiting(SeenLimiter);
+
         // Records files already imported outside the app (hashed by the caller's own script; never re-read here).
         api.MapPost("/dbs/{name}/imports/backfill", (string name, List<BackfillEntryRequest>? body, DataRootResolver data, IImportHistory history) =>
         {
@@ -218,6 +231,7 @@ public static class ApiEndpoints
     private sealed record CreateDbRequest(string? Name);
     private sealed record SearchRequest(string? Query, bool? IgnoreCase, bool? Contains);
     private sealed record ImportCheckRequest(string? Sha256, string? Name, long? Size, int? Min, int? Max);
+    private sealed record ImportSeenRequest(long? Size, string? Sha256);
     private sealed record BackfillEntryRequest(string? Name, string? Sha256, long? SizeBytes, DateTimeOffset? ImportedAtUtc);
 
     private static IResult Problem(int status, string detail) =>

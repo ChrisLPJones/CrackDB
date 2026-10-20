@@ -46,6 +46,11 @@ public interface IImportHistory
     /// <summary>Advisory match by label and size when the hash is not known yet.</summary>
     ImportRecord? FindByNameAndSize(string db, IReadOnlyCollection<string> labels, long size, int? min, int? max);
     ImportRecord? FindChangedByName(string db, IReadOnlyCollection<string> labels);
+    /// <summary>
+    /// Booleans only, for the browser's pre-upload check: does any completed/backfilled import have this size, and
+    /// (when a sha256 is given) is this exact content already imported unfiltered? Reveals nothing else.
+    /// </summary>
+    (bool SizeMatch, bool Duplicate) Seen(string db, long size, string? sha256);
     void Append(string db, ImportRecord record);
     /// <summary>
     /// Records files already imported outside the app (not re-read here) as status "backfilled", unfiltered
@@ -136,6 +141,16 @@ public sealed partial class ImportHistory(DataRootResolver resolver, ILogger<Imp
         var changed = source == null ? null
             : done.FirstOrDefault(r => r.Sha256 != hash && string.Equals(r.Source, source, StringComparison.Ordinal));
         return new ImportCheck(null, narrower == null ? changed : null, narrower);
+    }
+
+    public (bool SizeMatch, bool Duplicate) Seen(string db, long size, string? sha256)
+    {
+        var sized = Load(db).Where(r => r.Status is "completed" or "backfilled" && r.SizeBytes == size).ToList();
+        if (sized.Count == 0) return (false, false);
+        if (sha256 == null) return (true, false);
+        var hash = sha256.ToLowerInvariant();
+        // Same rule as the upload's 409: the prior import must cover an unfiltered import (the browser sends no min/max).
+        return (true, sized.Any(r => r.Sha256 == hash && Covers(r, null, null)));
     }
 
     public ImportRecord? FindByNameAndSize(string db, IReadOnlyCollection<string> labels, long size, int? min, int? max) =>
