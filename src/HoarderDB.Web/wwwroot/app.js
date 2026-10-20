@@ -65,13 +65,13 @@ async function loadSize() {
   const wanted = db();
   try {
     const s = await api('/api/dbs/' + enc(wanted) + '/stats?full=false');
-    if (db() === wanted) show('size', fmt(s.estimatedCount) + ' passwords (approximate)');
+    if (db() === wanted) { bdEst = Number(s.estimatedCount) || 0; show('size', fmt(s.estimatedCount) + ' passwords (approximate)'); renderBdButton(); }
   } catch (e) { if (db() === wanted) fail('size', e); }
 }
 
 function onDbChanged() {
   updateExportAction();
-  show('stats', '');
+  resetBreakdown();
   loadSize();
   loadHistory();
 }
@@ -138,31 +138,124 @@ async function loadHistory() {
   } catch (e) { if (db() === wanted) { body.replaceChildren(); fail('histinfo', e); } }
 }
 
-$('statsbtn').addEventListener('click', async () => {
-  if (!db()) return;
-  show('stats', 'Loading...');
+// ---- length breakdown: the server stores the last exact result (recomputed after the Sunday compaction);
+// the button queues a scan job. Nothing carries over between databases. ----
+
+let bdEst = 0;   // approximate entry count of the current db, for scan progress text
+let bd = { db: '', loaded: false, hasStored: false, activeId: null, posting: false, note: '' };
+const bdOpen = () => document.querySelector('#stats-panel details').open;
+const bdJob = () => lastJobs.find((j) => j.kind === 'breakdown' && j.db === db() && !TERMINAL.includes(j.status));
+
+function renderLengths(lengths) {
+  const out = $('stats');
+  out.textContent = '';
+  if (!lengths.length) { out.textContent = 'Database is empty.'; return; }
+  const grid = document.createElement('div');
+  grid.className = 'lengthgrid';
+  // Column-major fill (column 1 = the lowest lengths, column 2 = the next chunk, and so on),
+  // evenly split across columns regardless of how many distinct lengths there are.
+  const cols = window.matchMedia('(max-width: 480px)').matches ? 2 : 3;
+  const rows = Math.max(1, Math.ceil(lengths.length / cols));
+  grid.style.gridTemplateRows = `repeat(${rows}, auto)`;
+  grid.append(...lengths.map((l) => {
+    const cell = document.createElement('div');
+    cell.className = 'lengthcell';
+    const a = document.createElement('span'); a.className = 'muted'; a.textContent = 'length ' + l.length + ': ';
+    const b = document.createElement('span'); b.textContent = fmt(l.count);
+    cell.append(a, b); return cell;
+  }));
+  out.append(grid);
+}
+
+function resetBreakdown() {
+  bd = { db: db(), loaded: false, hasStored: false, activeId: null, posting: false, note: '' };
+  bdEst = 0;
+  show('stats', '');
+  show('statsasof', '');
+  renderBdButton();
+  if (db() && bdOpen()) loadBreakdown();
+}
+
+async function loadBreakdown() {
+  const wanted = db();
+  if (!wanted) return;
   try {
-    const s = await api('/api/dbs/' + enc(db()) + '/stats?full=true');
-    const out = $('stats');
-    out.textContent = '';
-    if (s.lengths) {
-      const grid = document.createElement('div');
-      grid.className = 'lengthgrid';
-      // Column-major fill (column 1 = the lowest lengths, column 2 = the next chunk, and so on),
-      // evenly split across columns regardless of how many distinct lengths there are.
-      const cols = window.matchMedia('(max-width: 480px)').matches ? 2 : 3;
-      const rows = Math.max(1, Math.ceil(s.lengths.length / cols));
-      grid.style.gridTemplateRows = `repeat(${rows}, auto)`;
-      grid.append(...s.lengths.map((l) => {
-        const cell = document.createElement('div');
-        cell.className = 'lengthcell';
-        const a = document.createElement('span'); a.className = 'muted'; a.textContent = 'length ' + l.length + ': ';
-        const b = document.createElement('span'); b.textContent = fmt(l.count);
-        cell.append(a, b); return cell;
-      }));
-      out.append(grid);
+    const r = await api('/api/dbs/' + enc(wanted) + '/length-breakdown');
+    if (db() !== wanted) return;   // stale response for a database no longer selected
+    bd.loaded = true;
+    bd.hasStored = r.asOf != null && r.lengths != null;
+    const note = bd.note ? ' ' + bd.note : '';
+    bd.note = '';
+    if (bd.hasStored) {
+      renderLengths(r.lengths);
+      show('statsasof', 'As of ' + fmtDate(r.asOf) + '.' + note);
+    } else {
+      show('stats', '');
+      show('statsasof', 'Not computed yet. It runs after the next weekly compaction, or press Initialize breakdown.' + note);
     }
-  } catch (e) { fail('stats', e); }
+  } catch (e) {
+    if (db() !== wanted) return;
+    bd.loaded = true;   // leave the button usable with the last known label; the click still POSTs
+    show('statsasof', e.message === 'signed out' ? '' : e.message);
+  }
+  renderBdButton();
+}
+
+// One place decides the button label and the status line, called after each GET and each jobs poll.
+function renderBdButton() {
+  const btn = $('statsbtn'), line = $('statsjob');
+  const job = bdJob();
+  if (job) {
+    bd.activeId = job.id;
+    btn.disabled = true;
+    btn.textContent = job.status === 'queued' ? 'Queued...' : 'Scanning...';
+    let t;
+    if (job.status === 'queued') {
+      const ahead = runningJob();
+      t = ahead ? 'Queued, waiting for ' + verbing(ahead) + ' of ' + ahead.db + ' to finish.' : 'Queued.';
+    } else {
+      t = 'Scanning: ' + fmt(job.scannedCount) + (bdEst > 0 ? ' of about ' + fmt(bdEst) : '') + ' entries';
+    }
+    $('statsjobtext').textContent = t;
+    line.hidden = false;
+    return;
+  }
+  line.hidden = true;
+  if (bd.activeId) {
+    // The scan we were showing has ended: re-read the stored result (it only changes on success).
+    const done = lastJobs.find((j) => j.id === bd.activeId);
+    bd.activeId = null;
+    if (done && done.status === 'failed' && done.error) bd.note = 'Last scan failed: ' + done.error;
+    else if (done && done.status === 'cancelled') bd.note = 'Last scan was cancelled.';
+    bd.loaded = false;
+    loadBreakdown();
+  }
+  btn.textContent = bd.hasStored ? 'Update breakdown' : 'Initialize breakdown';
+  btn.disabled = !bd.loaded || bd.posting;
+}
+
+$('statsbtn').addEventListener('click', async () => {
+  if (!db() || bd.posting) return;
+  bd.posting = true;
+  renderBdButton();
+  try {
+    await api('/api/jobs/length-breakdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ db: db() }) });
+    await pollJobs();
+  } catch (e) { fail('statsasof', e); }
+  finally { bd.posting = false; renderBdButton(); }
+});
+
+$('statscancel').addEventListener('click', async () => {
+  const job = bdJob();
+  if (!job) return;
+  $('statscancel').disabled = true;
+  try { await api('/api/jobs/' + enc(job.id) + '/cancel', { method: 'POST' }); await pollJobs(); }
+  catch (e) { fail('statsasof', e); }
+  finally { $('statscancel').disabled = false; }
+});
+
+document.querySelector('#stats-panel details').addEventListener('toggle', () => {
+  if (bdOpen() && !bd.loaded) loadBreakdown();
 });
 
 // ---- import / compact jobs ----
@@ -263,7 +356,6 @@ $('delbtn').addEventListener('click', async () => {
     await api('/api/dbs/' + enc(name), { method: 'DELETE' });
     show('deleteerror', '');
     closeDelete();
-    show('stats', '');
     show('size', '');
     await loadDbs();
   } catch (e) { fail('deleteerror', e); }
@@ -286,10 +378,11 @@ function fmtElapsed(j) {
 let lastJobs = [];
 const activeJobs = () => lastJobs.filter((j) => !TERMINAL.includes(j.status));
 const runningJob = () => lastJobs.find((j) => j.status === 'running');
-const verbing = (j) => (j.kind === 'compact' ? 'compaction' : 'import');
+const verbing = (j) => (j.kind === 'compact' ? 'compaction' : j.kind === 'breakdown' ? 'length scan' : j.kind === 'search' ? 'search' : 'import');
 
 function renderBanner() {
-  const r = runningJob();
+  // Only a running import or compaction takes the database away; a breakdown scan or search leaves reads working.
+  const r = lastJobs.find((j) => j.status === 'running' && (j.kind === 'import' || j.kind === 'compact'));
   const b = $('banner');
   const sum = $('importsummary');
   const clearNotice = () => { if (sum.dataset.kind === 'notice') { sum.textContent = ''; sum.className = ''; delete sum.dataset.kind; } };
@@ -315,6 +408,7 @@ async function pollJobs() {
   try {
     ({ jobs: lastJobs } = await api('/api/jobs'));
     renderBanner();
+    renderBdButton();
     if (currentJob && currentJob.status === 'queued') {
       const mine = lastJobs.find((j) => j.id === currentJob.id);
       if (mine) renderJob(mine);
@@ -699,9 +793,10 @@ $('jobcancel').addEventListener('click', async () => {
 (async () => {
   try {
     const { jobs } = await api('/api/jobs');
-    const active = jobs.find((j) => !TERMINAL.includes(j.status));
+    const active = jobs.find((j) => (j.kind === 'import' || j.kind === 'compact') && !TERMINAL.includes(j.status));   // scans and searches have their own UI
     lastJobs = jobs;
     renderBanner();
+    renderBdButton();
     if (active) { renderJob(active); track(active.id); }
   } catch (e) { /* the panel just starts idle */ }
 })();

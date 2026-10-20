@@ -2,7 +2,7 @@ using HoarderDB.Web.Storage;
 
 namespace HoarderDB.Web.Jobs;
 
-public enum JobKind { Import, Compact, Search }
+public enum JobKind { Import, Compact, Search, Breakdown }
 public enum JobStatus { Queued, Running, Completed, Failed, Cancelled }
 
 /// <summary>JSON shape of a job (what SSE frames and the job endpoints return).</summary>
@@ -12,7 +12,7 @@ public sealed record JobSnapshot(
     long EstCountBefore, long EstCountAfter, long EstNewEntries, int Errors,
     DateTimeOffset QueuedAt, DateTimeOffset? StartedAt, DateTimeOffset? EndedAt, string? Error,
     string? Note = null, ImportMatch? DuplicateOf = null,
-    // Search-only fields (unused/zero for Import/Compact). Matches is always null in a snapshot: the
+    // Search-only fields (also the running key count of a Breakdown scan; zero for Import/Compact). Matches is always null in a snapshot: the
     // match list can be huge, so it is paged out of the spool (GET /api/jobs/{id}/matches) instead
     // of riding every SSE frame. Capped means a server limit (low disk) stopped the scan; see Note.
     long ScannedCount = 0, long MatchedCount = 0, IReadOnlyList<string>? Matches = null, bool Capped = false);

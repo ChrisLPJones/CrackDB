@@ -12,7 +12,8 @@ namespace HoarderDB.Web.Jobs;
 /// </summary>
 public sealed class JobQueue(
     JobRegistry registry, IDbManager dbs, IncomingPathResolver incoming,
-    IImportProgressHook hook, IImportHistory history, ILogger<JobQueue> log,
+    IImportProgressHook hook, IImportHistory history, ILengthBreakdownStore breakdowns,
+    IBreakdownProgressHook breakdownHook, ILogger<JobQueue> log,
     CompactionHistory? compactionHistory = null) : IHostedService
 {
     private readonly Channel<string> _channel = Channel.CreateUnbounded<string>(
@@ -46,15 +47,15 @@ public sealed class JobQueue(
     }
 
     /// <summary>
-    /// Request cancellation. Imports and searches stop cooperatively (checked every chunk); a running
-    /// compact cannot be cancelled. A search job is never queued through this worker (see
+    /// Request cancellation. Imports, searches and length-breakdown scans stop cooperatively (checked
+    /// every chunk / every 65,536 keys); a running compact cannot be cancelled. A search job is never queued through this worker (see
     /// <see cref="SearchRunner"/>), but it shares this one cancel endpoint/route, so it is handled
     /// here too - Cts.Cancel() is all that's needed, SearchRunner.ExecuteAsync does its own cleanup.
     /// </summary>
     public JobSnapshot Cancel(Job job)
     {
         if (job.TryCancelQueued()) Cleanup(job);
-        else if (job.Kind is JobKind.Import or JobKind.Search && !job.IsTerminal)
+        else if (job.Kind is JobKind.Import or JobKind.Search or JobKind.Breakdown && !job.IsTerminal)
         {
             try { job.Cts.Cancel(); } catch (ObjectDisposedException) { /* finished in the meantime */ }
         }
@@ -85,13 +86,15 @@ public sealed class JobQueue(
             // headroom above the configured import budget. Checked for every job (import or
             // compact), since both run through the same bulk/read handle and memory budget.
             // Refused before it ever ran, so it never attempted work: no import-history record.
-            if (!HeadroomGuard.HasHeadroom(dbs.ResolvedImportBudgetBytes, out var headroomReason))
+            // A breakdown scan is read-only (no import budget), so it skips the check.
+            if (job.Kind != JobKind.Breakdown && !HeadroomGuard.HasHeadroom(dbs.ResolvedImportBudgetBytes, out var headroomReason))
             {
                 job.Finish(JobStatus.Failed, headroomReason!);
                 return;
             }
             var outcome = ImportOutcome.Imported;
             if (job.Kind == JobKind.Import) outcome = await ImportRunner.RunAsync(job, dbs, history, hook, linked.Token);
+            else if (job.Kind == JobKind.Breakdown) await BreakdownRunner.RunAsync(job, dbs, breakdowns, breakdownHook, linked.Token);
             else await CompactRunner.RunAsync(job, dbs, linked.Token);
             if (outcome == ImportOutcome.Skipped)
             {
@@ -105,6 +108,10 @@ public sealed class JobQueue(
                 var terminal = job.Kind == JobKind.Import && linked.IsCancellationRequested
                     ? JobStatus.Cancelled : JobStatus.Completed;
                 Record(job, terminal);     // before Finish: a client that sees the terminal job already sees its entry
+                // Before Finish too, so there is no gap where nothing is queued. Scheduled (weekly) compacts only.
+                if (job.Kind == JobKind.Compact && job.RunId != null && terminal == JobStatus.Completed
+                    && !_stopping.IsCancellationRequested)
+                    ScheduleBreakdown(job.DbName);
                 job.Finish(terminal);
             }
         }
@@ -118,12 +125,24 @@ public sealed class JobQueue(
             {
                 DbBusyException => "Database is busy.",
                 DbNotFoundException => "Database not found.",
+                BreakdownSaveException => "Could not save the length breakdown.",
                 SourceChangedException => "The source file changed while it was being read.",
                 IOException => "I/O error while reading the source or writing the database.",
                 _ => "The job failed. See the server log.",
             });
         }
         finally { RecordCompaction(job); Cleanup(job); }
+    }
+
+    /// <summary>Queues the post-compaction length scan unless one is already queued/running for the db. Advisory, never fatal.</summary>
+    private void ScheduleBreakdown(string db)
+    {
+        try
+        {
+            if (registry.List().Any(j => j.Kind == "breakdown" && j.Db == db && j.Status is "queued" or "running")) return;
+            Enqueue(new Job(JobKind.Breakdown, db, null));
+        }
+        catch (Exception ex) { log.LogWarning("Could not queue the length breakdown ({Kind})", ex.GetType().Name); }
     }
 
     /// <summary>Writes the import's history entry. Only imports whose content hash is known are recorded; advisory, never fatal.</summary>

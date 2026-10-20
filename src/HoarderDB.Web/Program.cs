@@ -67,6 +67,8 @@ services.AddSingleton<AppSettingsStore>();
 services.AddSingleton<CompactionSchedule>();
 services.AddSingleton<CompactionHistory>();
 services.TryAddSingleton(TimeProvider.System);
+services.AddSingleton<ILengthBreakdownStore, LengthBreakdownStore>();
+services.TryAddSingleton<IBreakdownProgressHook, NoopBreakdownProgressHook>();
 services.AddSingleton<JobQueue>();
 services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
 // Registered after JobQueue so it stops first on shutdown (reverse order).
