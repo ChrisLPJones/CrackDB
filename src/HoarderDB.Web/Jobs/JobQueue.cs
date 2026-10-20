@@ -12,7 +12,8 @@ namespace HoarderDB.Web.Jobs;
 /// </summary>
 public sealed class JobQueue(
     JobRegistry registry, IDbManager dbs, IncomingPathResolver incoming,
-    IImportProgressHook hook, IImportHistory history, ILogger<JobQueue> log) : IHostedService
+    IImportProgressHook hook, IImportHistory history, ILogger<JobQueue> log,
+    CompactionHistory? compactionHistory = null) : IHostedService
 {
     private readonly Channel<string> _channel = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleReader = true });
@@ -122,7 +123,7 @@ public sealed class JobQueue(
                 _ => "The job failed. See the server log.",
             });
         }
-        finally { Cleanup(job); }
+        finally { RecordCompaction(job); Cleanup(job); }
     }
 
     /// <summary>Writes the import's history entry. Only imports whose content hash is known are recorded; advisory, never fatal.</summary>
@@ -138,6 +139,19 @@ public sealed class JobQueue(
                 job.Min, job.Max, s.LinesRead, s.Errors, s.EstNewEntries, job.ForcedOverride));
         }
         catch (Exception ex) { log.LogWarning("Could not record import history for job {Id} ({Kind})", job.Id, ex.GetType().Name); }
+    }
+
+    /// <summary>Appends a finished compact job to the compaction history (advisory, never fatal; terminal on every path here).</summary>
+    private void RecordCompaction(Job job)
+    {
+        if (job.Kind != JobKind.Compact || compactionHistory is null) return;
+        try
+        {
+            var s = job.Snapshot();
+            if (s.StartedAt is not { } started || s.EndedAt is not { } ended) return;
+            compactionHistory.Append(new CompactionEntry(job.RunId, job.DbName, s.Status, started, ended));
+        }
+        catch (Exception ex) { log.LogWarning("Could not record compaction history for job {Id} ({Kind})", job.Id, ex.GetType().Name); }
     }
 
     private void Cleanup(Job job)

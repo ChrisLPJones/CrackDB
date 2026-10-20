@@ -3,7 +3,9 @@ using Microsoft.Extensions.Options;
 namespace HoarderDB.Web.Options;
 
 /// <summary>
-/// Weekly auto-compaction schedule: Sunday 00:00 in this IANA time zone (e.g. Australia/Sydney).
+/// Time zone (IANA id, e.g. Australia/Sydney) of the weekly auto-compaction. Day, hour and minute are
+/// edited on the Settings page (stored in KeyPath/app-settings.json, default Sunday 00:00); the zone stays
+/// operator-owned here.
 /// Env: CRACKDB_Compaction__TimeZone/HOARDERDB_Compaction__TimeZone (HOARDERDB_ wins if both are set).
 /// </summary>
 public sealed class CompactionOptions

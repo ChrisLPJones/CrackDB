@@ -63,6 +63,10 @@ services.AddSingleton<SearchSpool>();
 services.AddHostedService(sp => sp.GetRequiredService<SearchSpool>());   // startup/shutdown wipe + 1 h expiry of search results
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
 services.TryAddSingleton<ISearchProgressHook, NoopSearchProgressHook>();
+services.AddSingleton<AppSettingsStore>();
+services.AddSingleton<CompactionSchedule>();
+services.AddSingleton<CompactionHistory>();
+services.TryAddSingleton(TimeProvider.System);
 services.AddSingleton<JobQueue>();
 services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
 // Registered after JobQueue so it stops first on shutdown (reverse order).
@@ -81,6 +85,7 @@ services.AddOptions<KeyManagementOptions>().Configure<IOptions<StorageOptions>, 
 
 // Auth: cookie for the browser, X-API-Key for scripts; a policy scheme picks per request.
 services.AddSingleton<CredentialVerifier>();
+services.AddSingleton<AccountEndpoints.State>();
 services.AddAuthentication(CredentialVerifier.SchemeSmart)
     .AddPolicyScheme(CredentialVerifier.SchemeSmart, null, o =>
         o.ForwardDefaultSelector = ctx =>
@@ -104,6 +109,16 @@ services.AddAuthentication(CredentialVerifier.SchemeSmart)
             else ctx.Response.Redirect(ctx.RedirectUri);
             return Task.CompletedTask;
         };
+        // Fail closed: a cookie without the current password stamp (older cookie, or password changed) is rejected.
+        o.Events.OnValidatePrincipal = async ctx =>
+        {
+            var stamp = ctx.HttpContext.RequestServices.GetRequiredService<CredentialVerifier>().CurrentStamp;
+            if (ctx.Principal?.FindFirst(AuthEndpoints.StampClaim)?.Value != stamp)
+            {
+                ctx.RejectPrincipal();
+                await ctx.HttpContext.SignOutAsync(CredentialVerifier.SchemeCookie);
+            }
+        };
         o.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
     });
 services.AddAuthorizationBuilder()
@@ -126,6 +141,13 @@ services.AddRateLimiter(o =>
                 QueueLimit = 0,
             });
     });
+    o.AddPolicy(AccountEndpoints.PasswordLimiter, ctx =>
+    {
+        var permits = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.PasswordChangeAttemptsPerMinute;
+        return RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 });
+    });
     // Search-start rate limit: same fixed-window-per-IP shape as login, so repeated restarts of a
     // substring scan can't approximate a sustained one (the single-search gate already stops two at
     // once; this stops churning through the gate). Not user/operator configurable - a fixed, modest
@@ -133,6 +155,10 @@ services.AddRateLimiter(o =>
     o.AddPolicy(ApiEndpoints.SearchLimiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
+    // Settings writes: per IP, modest cap (single-user app; the page saves rarely).
+    o.AddPolicy(SettingsEndpoints.Limiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
     o.OnRejected = async (ctx, ct) =>
     {
         ctx.HttpContext.Response.Headers.RetryAfter = "60";
@@ -162,6 +188,9 @@ if (Environment.GetEnvironmentVariables().Keys.Cast<string>().Any(k => k.StartsW
         "Configuration uses the legacy CRACKDB_ environment-variable prefix; HOARDERDB_ is now recommended (both are honored, HOARDERDB_ wins on conflict).");
 }
 
+// Load the admin password store now so a corrupt admin-password.json aborts startup (not the first login).
+_ = app.Services.GetRequiredService<CredentialVerifier>();
+
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
@@ -183,7 +212,7 @@ app.UseAuthentication();
 // Static files are served before endpoint routing, so the fallback policy would not cover the app
 // shell. Gate everything except the explicit anonymous list here.
 var anonymous = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/style.css", "/favicon.svg" };
+    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/theme.js", "/style.css", "/favicon.svg" };
 app.Use(async (ctx, next) =>
 {
     if (!anonymous.Contains(ctx.Request.Path.Value ?? "") && ctx.User.Identity?.IsAuthenticated != true)
@@ -201,6 +230,8 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Text("ok")).AllowAnonymous();
 app.MapAuth();
 app.MapApi();
+app.MapAccount();
+app.MapSettings();
 app.MapJobs();
 
 app.Run();

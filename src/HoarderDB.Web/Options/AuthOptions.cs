@@ -17,6 +17,8 @@ public sealed class AuthOptions
     public string ApiKeyHash { get; set; } = "";
     /// <summary>Failed/any POST /login attempts allowed per client IP per minute.</summary>
     public int LoginAttemptsPerMinute { get; set; } = 5;
+    /// <summary>POST /api/account/password attempts allowed per client IP per minute.</summary>
+    public int PasswordChangeAttemptsPerMinute { get; set; } = 5;
 }
 
 public sealed class AuthOptionsValidator : IValidateOptions<AuthOptions>
@@ -35,11 +37,13 @@ public sealed class AuthOptionsValidator : IValidateOptions<AuthOptions>
             errors.Add("Auth:ApiKeyHash must be the 64-character hex SHA-256 of the API key.");
         if (o.LoginAttemptsPerMinute < 1)
             errors.Add("Auth:LoginAttemptsPerMinute must be at least 1.");
+        if (o.PasswordChangeAttemptsPerMinute < 1)
+            errors.Add("Auth:PasswordChangeAttemptsPerMinute must be at least 1.");
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
 
     // Never echo the value itself in a message.
-    private static bool LooksLikeIdentityHash(string h)
+    internal static bool LooksLikeIdentityHash(string h)
     {
         try
         {

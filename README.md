@@ -92,16 +92,19 @@ Configuration is read from `appsettings.json` and environment variables (use `__
 | `Storage__DataRoot` | yes | Existing directory whose subdirectories are the databases. |
 | `Storage__KeyPath` | yes | Directory for the Data Protection key ring (keep it private, mode 0700) so sessions survive restarts. |
 | `Storage__IncomingRoot` | no | Existing directory that server-side imports are read from (e.g. `/data/incoming`); browser uploads are staged in its `.uploads` subfolder. Unset disables file import and upload (compact still works). |
-| `Compaction__TimeZone` | no | IANA time zone for the weekly auto-compaction (Sunday 00:00 local time), default `Australia/Sydney`; `UTC` also works. DST-aware. An unknown id aborts startup; the host needs the `tzdata` package (`/usr/share/zoneinfo`) for any zone other than `UTC`. |
+| `Compaction__TimeZone` | no | IANA time zone for the weekly auto-compaction (default schedule Sunday 00:00 local time; day, time and on/off are edited on the Settings page), default `Australia/Sydney`; `UTC` also works. DST-aware. An unknown id aborts startup; the host needs the `tzdata` package (`/usr/share/zoneinfo`) for any zone other than `UTC`. |
 | `Upload__MaxBytes` | no | Cap for a browser upload in bytes. Unset or `0` (the default) means no limit; the file is streamed to disk and the upload is refused with 507 if free disk space runs low. A reverse proxy in front may impose its own body-size limit. |
 | `Auth__Username` | yes | Login user name. |
 | `Auth__PasswordHash` | yes | Output of `hoarderdb hashpw`. |
 | `Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
 | `Auth__LoginAttemptsPerMinute` | no | Login attempts per client IP per minute (default 5). |
+| `Auth__PasswordChangeAttemptsPerMinute` | no | Password-change attempts per client IP per minute (default 5). Separately, 5 wrong current-password attempts lock the change for 15 minutes (in memory). |
 | `ForwardedProxies` | no | Comma/space-separated IP addresses of reverse proxies (other than loopback) trusted to send `X-Forwarded-For`/`-Proto`, e.g. your Caddy host. Default: loopback only. Invalid values abort startup. |
 | `ForwardedNetworks` | no | Same, as CIDRs (e.g. `192.168.50.0/24`). Only list networks where nothing but your proxy can reach the app port. |
 
 For example, the data root is `HOARDERDB_Storage__DataRoot` (or the still-supported `CRACKDB_Storage__DataRoot`).
+
+**Changing the password:** signed-in users change it on the Settings page (`/settings.html`); it needs the current password and a new one of 12-128 characters. The new hash is stored in `<KeyPath>/admin-password.json` (mode 0600, hash only) and takes precedence over `Auth__PasswordHash` while that env value is unchanged, so it survives restarts and redeploys. All other sessions are signed out; the API key is not affected. Recovery if the password is lost: set a new `Auth__PasswordHash` (`hoarderdb hashpw`) and restart (a changed env hash overrides the stored one), or delete `admin-password.json` to fall back to the env hash. A present but unreadable `admin-password.json` (including a dangling link) aborts startup (fix or delete it).
 
 Make an API key and its hash (keep the key itself out of config files; only the hash goes in the environment):
 ```
@@ -116,6 +119,7 @@ dotnet run --project src/HoarderDB.Web -c Release
 Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; errors are RFC 7807 problem JSON):
 
 - `GET /healthz` - `ok`.
+- `POST /api/account/password` - JSON `{ "currentPassword", "newPassword" }`; session cookie only (an API key gets 403). 204 on success (this browser stays signed in), 403 wrong current password, 400 rule violation or bad body, 415 not JSON, 429 rate limited or locked out, 500 could not save.
 - `GET /api/dbs` - database names.
 - `POST /api/dbs` - JSON `{ "name" }` creates a new, empty database. Returns 201 `{ "name" }`; 400 for an invalid name, 409 if it already exists or the database limit (512) is reached.
 - `DELETE /api/dbs/{name}` - permanently deletes the database directory. 204 on success; 404 if it does not exist (including a repeat delete); 400 for an invalid name; 409 if an import/compact job is queued or running for it.
@@ -132,7 +136,7 @@ Import and compact run as background jobs, one at a time (a bulk import uses sev
 
 - `POST /api/jobs/import` - JSON `{ "db", "source", "min"?, "max"? }`. `source` is a path relative to `IncomingRoot` (no `..`, absolute paths, dot-prefixed names or symlinks); `db` is created if it does not exist. Optional `"force": true` imports even if identical content was already imported. Returns 202 `{ "id" }`. The job hashes the file first (one extra sequential read); if the same content (SHA-256) was already imported completely with a length filter that covers this one, the job ends as `cancelled` with the error `Skipped: identical content already imported on <date>` and a `duplicateOf` field, and nothing is imported.
 - `POST /api/jobs/upload` - `multipart/form-data` with the fields `db`, optional `min`/`max`, then the `file` part last. The web UI accepts several files and sends them one POST at a time (each import finishes before the next upload), showing upload progress. Streamed to a temporary file and deleted when the job ends; over the cap (when `Upload:MaxBytes` is set) is 413, low free disk space is 507, and only one upload runs at a time (a second gets 409). Lines longer than 8 KiB are skipped and counted in the job's `errors`. Optional field `force=true` (before the file part) imports even if identical content was already imported; otherwise a duplicate upload is answered 409 with `"code": "already_imported"` and `duplicateOf` (409 is also used for "another upload in progress", so branch on `code`). The 202 body is `{ "id", "note"?, "previous"? }`; `note` flags a changed file (same name, different content) or a wider length filter than before.
-- `POST /api/jobs/compact` - JSON `{ "db" }`; the database must exist (404 otherwise). A running compaction cannot be cancelled. Every database is also compacted automatically each Sunday at 00:00 in the configured time zone (`HOARDERDB_Compaction__TimeZone` / `CRACKDB_Compaction__TimeZone`, default Australia/Sydney) through the same job queue (no catch-up if the server was down at that time).
+- `POST /api/jobs/compact` - JSON `{ "db" }`; the database must exist (404 otherwise). A running compaction cannot be cancelled. Every database is also compacted automatically each week (default Sunday 00:00; editable on the Settings page) in the configured time zone (`HOARDERDB_Compaction__TimeZone` / `CRACKDB_Compaction__TimeZone`, default Australia/Sydney) through the same job queue (no catch-up if the server was down at that time).
 - `GET /api/jobs` - recent and active jobs; `GET /api/jobs/{id}` - one job (poll this from scripts).
 - `GET /api/jobs/{id}/events` - Server-Sent Events progress snapshots, ending after the final one. Session cookie only (`EventSource` cannot send `X-API-Key`).
 - `POST /api/jobs/{id}/cancel` - stops an import after the current line (data already read is kept and flushed) or removes a queued job.
