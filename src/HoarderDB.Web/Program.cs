@@ -81,6 +81,7 @@ services.AddOptions<KeyManagementOptions>().Configure<IOptions<StorageOptions>, 
 
 // Auth: cookie for the browser, X-API-Key for scripts; a policy scheme picks per request.
 services.AddSingleton<CredentialVerifier>();
+services.AddSingleton<AccountEndpoints.State>();
 services.AddAuthentication(CredentialVerifier.SchemeSmart)
     .AddPolicyScheme(CredentialVerifier.SchemeSmart, null, o =>
         o.ForwardDefaultSelector = ctx =>
@@ -104,6 +105,16 @@ services.AddAuthentication(CredentialVerifier.SchemeSmart)
             else ctx.Response.Redirect(ctx.RedirectUri);
             return Task.CompletedTask;
         };
+        // Fail closed: a cookie without the current password stamp (older cookie, or password changed) is rejected.
+        o.Events.OnValidatePrincipal = async ctx =>
+        {
+            var stamp = ctx.HttpContext.RequestServices.GetRequiredService<CredentialVerifier>().CurrentStamp;
+            if (ctx.Principal?.FindFirst(AuthEndpoints.StampClaim)?.Value != stamp)
+            {
+                ctx.RejectPrincipal();
+                await ctx.HttpContext.SignOutAsync(CredentialVerifier.SchemeCookie);
+            }
+        };
         o.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
     });
 services.AddAuthorizationBuilder()
@@ -125,6 +136,13 @@ services.AddRateLimiter(o =>
                 Window = TimeSpan.FromSeconds(60),
                 QueueLimit = 0,
             });
+    });
+    o.AddPolicy(AccountEndpoints.PasswordLimiter, ctx =>
+    {
+        var permits = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.PasswordChangeAttemptsPerMinute;
+        return RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 });
     });
     // Search-start rate limit: same fixed-window-per-IP shape as login, so repeated restarts of a
     // substring scan can't approximate a sustained one (the single-search gate already stops two at
@@ -161,6 +179,9 @@ if (Environment.GetEnvironmentVariables().Keys.Cast<string>().Any(k => k.StartsW
     app.Logger.LogInformation(
         "Configuration uses the legacy CRACKDB_ environment-variable prefix; HOARDERDB_ is now recommended (both are honored, HOARDERDB_ wins on conflict).");
 }
+
+// Load the admin password store now so a corrupt admin-password.json aborts startup (not the first login).
+_ = app.Services.GetRequiredService<CredentialVerifier>();
 
 app.UseForwardedHeaders();
 app.UseExceptionHandler();
@@ -201,6 +222,7 @@ app.UseAuthorization();
 app.MapGet("/healthz", () => Results.Text("ok")).AllowAnonymous();
 app.MapAuth();
 app.MapApi();
+app.MapAccount();
 app.MapJobs();
 
 app.Run();

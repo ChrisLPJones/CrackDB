@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HoarderDB settings</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <header class="bar">
+    <h1>Settings</h1>
+    <nav class="actions">
+      <a href="/">Back</a>
+      <button id="logout" type="button">Sign out</button>
+    </nav>
+  </header>
+
+  <section>
+    <h2>Change password</h2>
+    <form id="pwform">
+      <label for="current">Current password</label>
+      <input id="current" type="password" autocomplete="current-password" required>
+      <label for="newpw">New password</label>
+      <input id="newpw" type="password" autocomplete="new-password" required>
+      <label for="confirm">Confirm new password</label>
+      <input id="confirm" type="password" autocomplete="new-password" required>
+      <p class="hint">12 to 128 characters; it must differ from the current password and the username. Changing it signs out all other sessions. The API key is not affected.</p>
+      <p id="error" class="error" role="alert"></p>
+      <p id="ok" class="success" role="status"></p>
+      <button id="save" class="primary" type="submit">Change password</button>
+    </form>
+  </section>
+</main>
+<script src="/settings.js"></script>
+</body>
+</html>

@@ -98,10 +98,13 @@ Configuration is read from `appsettings.json` and environment variables (use `__
 | `Auth__PasswordHash` | yes | Output of `hoarderdb hashpw`. |
 | `Auth__ApiKeyHash` | no | Lowercase hex SHA-256 of the API key; unset disables API-key access. |
 | `Auth__LoginAttemptsPerMinute` | no | Login attempts per client IP per minute (default 5). |
+| `Auth__PasswordChangeAttemptsPerMinute` | no | Password-change attempts per client IP per minute (default 5). Separately, 5 wrong current-password attempts lock the change for 15 minutes (in memory). |
 | `ForwardedProxies` | no | Comma/space-separated IP addresses of reverse proxies (other than loopback) trusted to send `X-Forwarded-For`/`-Proto`, e.g. your Caddy host. Default: loopback only. Invalid values abort startup. |
 | `ForwardedNetworks` | no | Same, as CIDRs (e.g. `192.168.50.0/24`). Only list networks where nothing but your proxy can reach the app port. |
 
 For example, the data root is `HOARDERDB_Storage__DataRoot` (or the still-supported `CRACKDB_Storage__DataRoot`).
+
+**Changing the password:** signed-in users change it on the Settings page (`/settings.html`); it needs the current password and a new one of 12-128 characters. The new hash is stored in `<KeyPath>/admin-password.json` (mode 0600, hash only) and takes precedence over `Auth__PasswordHash` while that env value is unchanged, so it survives restarts and redeploys. All other sessions are signed out; the API key is not affected. Recovery if the password is lost: set a new `Auth__PasswordHash` (`hoarderdb hashpw`) and restart (a changed env hash overrides the stored one), or delete `admin-password.json` to fall back to the env hash. A present but unreadable `admin-password.json` (including a dangling link) aborts startup (fix or delete it).
 
 Make an API key and its hash (keep the key itself out of config files; only the hash goes in the environment):
 ```
@@ -116,6 +119,7 @@ dotnet run --project src/HoarderDB.Web -c Release
 Endpoints (all but `/healthz` need the session cookie or an `X-API-Key` header; errors are RFC 7807 problem JSON):
 
 - `GET /healthz` - `ok`.
+- `POST /api/account/password` - JSON `{ "currentPassword", "newPassword" }`; session cookie only (an API key gets 403). 204 on success (this browser stays signed in), 403 wrong current password, 400 rule violation or bad body, 415 not JSON, 429 rate limited or locked out, 500 could not save.
 - `GET /api/dbs` - database names.
 - `POST /api/dbs` - JSON `{ "name" }` creates a new, empty database. Returns 201 `{ "name" }`; 400 for an invalid name, 409 if it already exists or the database limit (512) is reached.
 - `DELETE /api/dbs/{name}` - permanently deletes the database directory. 204 on success; 404 if it does not exist (including a repeat delete); 400 for an invalid name; 409 if an import/compact job is queued or running for it.

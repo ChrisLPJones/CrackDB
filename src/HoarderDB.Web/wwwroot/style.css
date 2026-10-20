@@ -133,3 +133,7 @@ input.visually-hidden, .visually-hidden { position: absolute; width: 1px; height
 
 /* Same top spacing as buttons, so the Download all link sits where Cancel was. */
 .actions .filebtn { margin-top: 12px; text-decoration: none; }
+
+/* Header actions (Settings link + Sign out) and the Settings page */
+nav.actions a { color: var(--accent); }
+nav.actions button { margin-top: 0; }
