@@ -1,3 +1,5 @@
+// Settings window (a <dialog> on the main page). Wrapped so its helpers don't clash with app.js globals.
+(function () {
 const $ = (id) => document.getElementById(id);
 
 $('logout').addEventListener('click', async () => {
@@ -132,4 +134,27 @@ $('schedform').addEventListener('submit', async (e) => {
   finally { $('sched-save').disabled = false; }
 });
 
-loadSettings();
+// ---- Window open/close ----
+const dlg = $('settingsdialog');
+function openSettings() {
+  $('status-error').textContent = '';
+  $('sched-error').textContent = ''; $('sched-ok').textContent = '';
+  $('error').textContent = ''; $('ok').textContent = '';
+  $('theme').value = window.HoarderTheme ? window.HoarderTheme.get() : 'auto';
+  if (!dlg.open) dlg.showModal();
+  loadSettings();   // schedule and status are re-read on every open
+}
+$('settingsbtn').addEventListener('click', openSettings);
+$('settingsclose').addEventListener('click', () => dlg.close());
+// A click on the backdrop lands on the dialog element itself (the body fills the rest of it).
+dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+dlg.addEventListener('close', () => {
+  $('pwform').reset();   // never leave typed passwords in the page
+  $('settingsbtn').focus();
+});
+// Old /settings.html bookmarks redirect here with #settings.
+if (location.hash === '#settings') {
+  history.replaceState(null, '', location.pathname + location.search);
+  openSettings();
+}
+})();

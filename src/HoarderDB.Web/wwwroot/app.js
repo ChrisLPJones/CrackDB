@@ -794,9 +794,4 @@ $('searchcancel').addEventListener('click', async () => {
   catch (e) { fail('searchjoberror', e); }
 });
 
-$('logout').addEventListener('click', async () => {
-  await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
-  location.href = '/login.html';
-});
-
 loadDbs();
