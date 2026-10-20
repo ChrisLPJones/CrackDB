@@ -341,7 +341,7 @@ function renderJob(j) {
     ['Source', histName(j) || '-'],
     ['Lines read', fmt(j.linesRead)],
     ['Bytes', fmtBytes(j.bytesRead) + ' / ' + fmtBytes(j.bytesTotal)],
-    ['New entries (approx)', '~' + fmt(j.estNewEntries)],
+    ['New entries (approx)', fmt(j.estNewEntries)],
     ['Elapsed', fmtElapsed(j)],
   ] : [['Elapsed', fmtElapsed(j)]];
   $('jobstats').replaceChildren(...rows.flatMap(([k, v]) => {
