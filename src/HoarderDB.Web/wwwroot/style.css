@@ -1,14 +1,23 @@
+/* Dark tokens appear twice (system dark below, and the explicit data-theme="dark"): keep both in sync. */
 :root {
   --bg: #f6f7f9; --surface: #ffffff; --text: #1b1f24; --muted: #5b6573;
   --border: #d5d9e0; --accent: #2a5bd7; --accent-text: #ffffff; --danger: #b3261e; --success: #1a7f37;
   --warn-bg: #fff4d6; --warn-border: #c58b00; --warn-text: #4a3500;
+  color-scheme: light dark;
 }
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #14171c; --surface: #1d2128; --text: #e6e9ee; --muted: #9aa4b2;
     --border: #333a45; --accent: #6b93ff; --accent-text: #0d1117; --danger: #ff8a80; --success: #56d364;
     --warn-bg: #3a2e0c; --warn-border: #d4a017; --warn-text: #ffe9a8;
   }
+}
+:root[data-theme="dark"] {
+  --bg: #14171c; --surface: #1d2128; --text: #e6e9ee; --muted: #9aa4b2;
+  --border: #333a45; --accent: #6b93ff; --accent-text: #0d1117; --danger: #ff8a80; --success: #56d364;
+  --warn-bg: #3a2e0c; --warn-border: #d4a017; --warn-text: #ffe9a8;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
@@ -31,6 +40,7 @@ label { display: block; font-size: .9rem; color: var(--muted); margin: 8px 0 2px
 input, select, button { font: inherit; color: var(--text); background: var(--surface);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
 input[type=text], input[type=password], input[type=number], select { width: 100%; }
+input[type=time] { min-width: 8rem; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row > div { flex: 1 1 120px; min-width: 0; }
 button { cursor: pointer; margin-top: 12px; }
@@ -137,3 +147,5 @@ input.visually-hidden, .visually-hidden { position: absolute; width: 1px; height
 /* Header actions (Settings link + Sign out) and the Settings page */
 nav.actions a { color: var(--accent); }
 nav.actions button { margin-top: 0; }
+ul.plain { list-style: none; margin: 4px 0 0; padding: 0; }
+ul.plain li { padding: 1px 0; overflow-wrap: anywhere; }

@@ -63,6 +63,10 @@ services.AddSingleton<SearchSpool>();
 services.AddHostedService(sp => sp.GetRequiredService<SearchSpool>());   // startup/shutdown wipe + 1 h expiry of search results
 services.TryAddSingleton<IImportProgressHook, NoopImportProgressHook>();
 services.TryAddSingleton<ISearchProgressHook, NoopSearchProgressHook>();
+services.AddSingleton<AppSettingsStore>();
+services.AddSingleton<CompactionSchedule>();
+services.AddSingleton<CompactionHistory>();
+services.TryAddSingleton(TimeProvider.System);
 services.AddSingleton<JobQueue>();
 services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
 // Registered after JobQueue so it stops first on shutdown (reverse order).
@@ -151,6 +155,10 @@ services.AddRateLimiter(o =>
     o.AddPolicy(ApiEndpoints.SearchLimiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
+    // Settings writes: per IP, modest cap (single-user app; the page saves rarely).
+    o.AddPolicy(SettingsEndpoints.Limiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
     o.OnRejected = async (ctx, ct) =>
     {
         ctx.HttpContext.Response.Headers.RetryAfter = "60";
@@ -204,7 +212,7 @@ app.UseAuthentication();
 // Static files are served before endpoint routing, so the fallback policy would not cover the app
 // shell. Gate everything except the explicit anonymous list here.
 var anonymous = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/style.css", "/favicon.svg" };
+    { "/healthz", "/login", "/logout", "/login.html", "/login.js", "/theme.js", "/style.css", "/favicon.svg" };
 app.Use(async (ctx, next) =>
 {
     if (!anonymous.Contains(ctx.Request.Path.Value ?? "") && ctx.User.Identity?.IsAuthenticated != true)
@@ -223,6 +231,7 @@ app.MapGet("/healthz", () => Results.Text("ok")).AllowAnonymous();
 app.MapAuth();
 app.MapApi();
 app.MapAccount();
+app.MapSettings();
 app.MapJobs();
 
 app.Run();

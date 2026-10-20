@@ -61,6 +61,9 @@ public sealed class Job
     /// <summary>The user chose to import even if identical content was already imported.</summary>
     public bool Force { get; init; }
 
+    /// <summary>Set on the compact jobs of one scheduled run (shared id); null = started by hand.</summary>
+    public string? RunId { get; init; }
+
     /// <summary>SHA-256 (lower hex) of the raw source bytes; known at upload time, or after the pre-pass for server-side files.</summary>
     public string? ContentSha256 { get { lock (_gate) return _sha; } }
     public long SizeBytes { get { lock (_gate) return _size; } }

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HoarderDB settings</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -16,6 +17,50 @@
       <button id="logout" type="button">Sign out</button>
     </nav>
   </header>
+
+  <section>
+    <h2>Colour mode</h2>
+    <label for="theme">Theme</label>
+    <select id="theme">
+      <option value="auto">Auto (follow system)</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+    <p class="hint">Saved in this browser only.</p>
+  </section>
+
+  <section>
+    <h2>Compaction schedule</h2>
+    <form id="schedform">
+      <label class="check" for="sched-enabled"><input id="sched-enabled" type="checkbox"> Run weekly compaction</label>
+      <div class="row">
+        <div>
+          <label for="sched-day">Day</label>
+          <select id="sched-day">
+            <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+            <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+            <option value="6">Saturday</option>
+          </select>
+        </div>
+        <div>
+          <label for="sched-time">Time</label>
+          <input id="sched-time" type="time" required>
+        </div>
+      </div>
+      <p class="hint">Server time zone: <span id="sched-zone"></span>.</p>
+      <p id="sched-next" class="hint"></p>
+      <p class="hint">Reads of a database are blocked while it is being compacted.</p>
+      <p id="sched-error" class="error" role="alert"></p>
+      <p id="sched-ok" class="success" role="status"></p>
+      <button id="sched-save" class="primary" type="submit">Save schedule</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <p id="status-error" class="error" role="alert"></p>
+    <ul id="status-list" class="plain"></ul>
+  </section>
 
   <section>
     <h2>Change password</h2>

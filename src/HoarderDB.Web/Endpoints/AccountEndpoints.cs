@@ -26,8 +26,7 @@ public static class AccountEndpoints
             var log = lf.CreateLogger("HoarderDB.Web.Account");
 
             // A leaked script key must not become a password takeover: cookie sessions only.
-            if (ctx.User.FindFirst("auth_method")?.Value != "cookie")
-                return Results.Problem(statusCode: 403, title: "Not allowed for this credential.");
+            if (DenyNonCookie(ctx) is { } denied) return denied;
             // JSON only: a cross-site form POST cannot carry this content type (CSRF, on top of SameSite=Strict).
             if (!ctx.Request.HasJsonContentType())
                 return Results.Problem(statusCode: 415, title: "Content-Type must be application/json.");
@@ -82,6 +81,11 @@ public static class AccountEndpoints
             return Results.NoContent();
         }).RequireRateLimiting(PasswordLimiter);
     }
+
+    /// <summary>403 unless the caller is a browser cookie session (an API key must not reach account/settings routes).</summary>
+    internal static IResult? DenyNonCookie(HttpContext ctx) =>
+        ctx.User.FindFirst("auth_method")?.Value != "cookie"
+            ? Results.Problem(statusCode: 403, title: "Not allowed for this credential.") : null;
 
     private static IResult Locked(HttpContext ctx, DateTime until)
     {
