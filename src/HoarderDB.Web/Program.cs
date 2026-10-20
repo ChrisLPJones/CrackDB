@@ -159,6 +159,10 @@ services.AddRateLimiter(o =>
     o.AddPolicy(SettingsEndpoints.Limiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
+    // Pre-upload duplicate check: one or two calls per queued file; generous enough for a big batch.
+    o.AddPolicy(ApiEndpoints.SeenLimiter, ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 600, Window = TimeSpan.FromSeconds(60), QueueLimit = 0 }));
     o.OnRejected = async (ctx, ct) =>
     {
         ctx.HttpContext.Response.Headers.RetryAfter = "60";

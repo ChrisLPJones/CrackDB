@@ -452,6 +452,57 @@ function renderUpload(name, loaded, total) {
   $('jobcancel').textContent = 'Cancel';
 }
 
+// ---- pre-upload duplicate check ----
+// Identical content implies identical size, so a size the database has never imported cannot be a duplicate and
+// the file is uploaded at once. Only on a size match is the file hashed here (SHA-256 over 8 MiB slices, never the
+// whole file in memory) and the hash asked about. The server's post-upload SHA-256 409 stays the final backstop,
+// so every failure in this check just falls back to uploading.
+const HASH_SLICE = 8 * 1024 * 1024;
+function renderChecking(name, loaded, total) {
+  $('job').hidden = false;
+  currentJob = null;
+  $('jobtitle').textContent = 'Checking ' + name + batchSuffix();
+  const st = $('jobstatus'); st.textContent = 'checking'; st.className = 'badge running';
+  const pct = total > 0 ? Math.min(100, (loaded / total) * 100) : 100;
+  const bar = $('jobbar'); bar.max = 100; bar.value = pct;
+  const dt = document.createElement('dt'); dt.textContent = 'Checked';
+  const dd = document.createElement('dd');
+  dd.textContent = Math.floor(pct) + '% (' + fmtBytes(loaded) + ' / ' + fmtBytes(total) + ')';
+  $('jobstats').replaceChildren(dt, dd);
+  show('joberror', '');
+  show('jobnote', '');
+  $('jobcancel').hidden = false;
+  $('jobcancel').textContent = 'Cancel';
+}
+
+// Resolves with the hex digest, or null when the batch was cancelled meanwhile.
+async function hashFile(file) {
+  const h = new Sha256();
+  for (let o = 0; o < file.size; o += HASH_SLICE) {
+    if (batch.cancelled) return null;
+    const end = Math.min(o + HASH_SLICE, file.size);
+    h.update(new Uint8Array(await file.slice(o, end).arrayBuffer()));
+    renderChecking(file.name, end, file.size);
+  }
+  return batch.cancelled ? null : h.hex();
+}
+
+// Returns 'duplicate' (skip the upload), 'cancelled', or 'upload' (also for any error: the server decides).
+async function precheck(file) {
+  const url = '/api/dbs/' + enc(batch.db) + '/imports/seen';
+  const post = (body) => api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    if (!(await post({ size: file.size })).sizeMatch) return 'upload';
+    renderChecking(file.name, 0, file.size);
+    const sha256 = await hashFile(file);
+    if (sha256 === null) return 'cancelled';
+    return (await post({ size: file.size, sha256 })).duplicate ? 'duplicate' : 'upload';
+  } catch (e) {
+    if (e.message === 'signed out') throw e;
+    return batch.cancelled ? 'cancelled' : 'upload';
+  }
+}
+
 // ---- resilience to a server restart / outage during a batch ----
 // Transient = the server (or the proxy in front of it) is briefly unavailable: 502/503/504 or a network
 // error (status 0, or fetch's TypeError). Never 4xx (409, 413, 401 ...) or 507: those are real answers.
@@ -523,9 +574,13 @@ async function runBatch(dbName, files) {
   // One attempt at one file. Resolves normally when the file reached a final outcome (imported, skipped
   // or failed for a real reason); throws a transient / interrupted error so the caller can wait and retry.
   const processFile = async (file) => {
+    // Already imported (same size, then same SHA-256, checked before any upload): skipped silently, listed in the summary.
+    const pre = await precheck(file);
+    if (pre === 'cancelled') return;
+    if (pre === 'duplicate') { skipped.push(file.name); return; }
     renderUpload(file.name, 0, file.size);
-    // No client-side skip: the server's SHA-256 check decides after the upload. A true duplicate answers 409
-    // already_imported, which is skipped silently (no prompt, no force) and listed in the batch summary.
+    // Backstop: the server's SHA-256 check after the upload. A true duplicate answers 409 already_imported,
+    // which is skipped silently (no prompt, no force) and listed in the batch summary.
     let res;
     try { res = await send(file); }
     catch (e) {
