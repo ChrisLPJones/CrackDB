@@ -25,6 +25,8 @@ public class HoarderDbWebFactory : WebApplicationFactory<Program>
     public static readonly string[] Words = { "abc", "ab", "zz", "hunter2", "abcd", "b", "longerword", "xyzzy1", "pass1234" };
 
     public string Root { get; }
+    /// <summary>Extra service registrations (e.g. a fake IDiskSpace); set before the host is first used.</summary>
+    public Action<IServiceCollection>? ExtraServices { get; init; }
     /// <summary>Throwaway incoming dir (Test_&lt;guid&gt; under the OS temp dir), separate from the data root.</summary>
     public string Incoming { get; }
     private readonly HoarderDB.Web.Jobs.IImportProgressHook? _hook;
@@ -89,6 +91,7 @@ public class HoarderDbWebFactory : WebApplicationFactory<Program>
             ["Auth:ApiKeyHash"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(ApiKey))),
             ["Auth:LoginAttemptsPerMinute"] = _loginLimit.ToString(),
         }.Concat(_extra)));
+        if (ExtraServices is not null) builder.ConfigureServices(ExtraServices);
         if (_hook is not null)
             builder.ConfigureServices(s => s.AddSingleton(_hook));
         if (_searchHook is not null)

@@ -16,6 +16,7 @@ public static class JobEndpoints
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private const int MaxFieldBytes = 256;
     public const long DiskReserveBytes = 64L * 1024 * 1024;
+    private const int MaxMatchPageBytes = 4 * 1024 * 1024;
     // One browser upload streams to disk at a time: parallel uploads would each only self-limit.
     private static readonly SemaphoreSlim UploadGate = new(1, 1);
     private static readonly TimeSpan SsePoll = TimeSpan.FromSeconds(1);
@@ -57,6 +58,34 @@ public static class JobEndpoints
 
         jobs.MapGet("/{id}", (string id, JobRegistry reg) =>
             Results.Ok((reg.Get(id) ?? throw new JobNotFoundException("Job not found.")).Snapshot()));
+
+        // Search matches, paged out of the on-disk spool: GET /api/jobs/{id}/matches?after=N&limit=M (limit
+        // clamped 1-10000 and the response capped at ~4 MiB of text, at least one item). `next` = the offset
+        // to ask for next. 404 for an unknown or non-search job; 410 once the results were deleted.
+        jobs.MapGet("/{id}/matches", (string id, JobRegistry reg, long? after, int? limit) =>
+        {
+            var job = SearchJob(reg, id);
+            if (job.Spool is not { IsDisposed: false } spool) return GoneResult();
+            try
+            {
+                var from = Math.Max(0, after ?? 0);
+                var (total, items) = spool.ReadPage(from, Math.Clamp(limit ?? 5000, 1, 10000), MaxMatchPageBytes);
+                return Results.Ok(new { total, items, next = from + items.Count });
+            }
+            catch (SearchResultsGoneException) { return GoneResult(); }
+        });
+
+        // Whole result list as a file, streamed from the spool (never buffered whole). Authenticated like every
+        // route in this group; fixed file name (nothing from the request reaches a header). Only for a finished
+        // search, so the file is complete.
+        jobs.MapGet("/{id}/matches/download", (string id, JobRegistry reg) =>
+        {
+            var job = SearchJob(reg, id);
+            if (!job.IsTerminal)
+                return Results.Problem(statusCode: 409, detail: "The search is still running.");
+            if (job.Spool is not { IsDisposed: false } spool) return GoneResult();
+            return new MatchesDownloadResult(spool);
+        });
 
         jobs.MapPost("/{id}/cancel", (string id, JobRegistry reg, JobQueue queue) =>
         {
@@ -114,6 +143,29 @@ public static class JobEndpoints
             }
         }
         catch (OperationCanceledException) { /* client went away */ }
+    }
+
+    private static Job SearchJob(JobRegistry reg, string id) =>
+        reg.Get(id) is { Kind: JobKind.Search } j ? j : throw new JobNotFoundException("Job not found.");
+
+    private static IResult GoneResult() =>
+        Results.Problem(statusCode: StatusCodes.Status410Gone, detail: "Results are no longer available.");
+
+    private sealed class MatchesDownloadResult(MatchSpool spool) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext ctx)
+        {
+            ctx.Response.ContentType = "text/plain; charset=utf-8";
+            ctx.Response.Headers.ContentDisposition = "attachment; filename=\"matches.txt\"";
+            ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            try { await spool.CopyAllLinesAsync(ctx.Response.Body, ctx.RequestAborted); }
+            catch (OperationCanceledException) { /* client went away */ }
+            catch (SearchResultsGoneException)
+            {
+                // Deleted mid-download (new search / expiry): headers may be sent already, so just end the stream.
+                if (!ctx.Response.HasStarted) ctx.Response.StatusCode = StatusCodes.Status410Gone;
+            }
+        }
     }
 
     // ---- upload ----
