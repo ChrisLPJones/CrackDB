@@ -118,7 +118,7 @@ public sealed class ParallelScanTests : IDisposable
         var seen = new List<long>();
         Assert.Empty(db.LengthDistributionCore(8, 0, null, default, seen.Add));
         Assert.Equal(0, db.CountRangeCore(null, null, 8, 0, null, default));
-        Assert.Equal(new long[] { 0 }, seen);
+        Assert.Equal(new long[] { 0, 0 }, seen);   // the planning report, then the final one
 
         db.Import(Enumerable.Range(0, 3000).Select(i => "k" + i.ToString("D5")), null, null, threads: 2);
         var got = db.LengthDistributionCore(8, 0, 1, default, null).ToArray();
@@ -245,6 +245,88 @@ public sealed class ParallelScanTests : IDisposable
         Assert.True(seen.Count >= 2, "expected at least one mid-scan tick plus the final one");
         for (int i = 1; i < seen.Count; i++) Assert.True(seen[i] >= seen[i - 1]);
         Assert.Equal(total, seen[^1]);
+    }
+
+    // ---- planning from file metadata (no key walk) ------------------------------------------------
+
+    [Fact]
+    public void Planning_Reports_BeforeFirstTile_AndCancelsDuringPlanning()
+    {
+        using var t = new TempDb();
+        var limiter = new ScanLimiter(3);
+        using var db = Seeded(t, limiter);
+        var order = new List<string>();
+        db.TileHook = _ => { lock (order) order.Add("tile"); };
+        var dist = db.LengthDistributionCore(3, 0, null, default, n => { lock (order) order.Add(order.Count == 0 ? "p" + n : "p"); }).ToArray();
+        Assert.Equal("p0", order[0]);                       // the 0-key report precedes every tile
+        Assert.Contains("tile", order);
+        Assert.Equal(db.LengthDistributionReference().ToArray(), dist);
+
+        // Cancelling from that first report (i.e. before/while planning) stops the scan before any tile runs.
+        using var cts = new CancellationTokenSource();
+        int tiles = 0;
+        db.TileHook = _ => Interlocked.Increment(ref tiles);
+        Assert.Throws<OperationCanceledException>(() =>
+            db.LengthDistributionCore(3, 0, null, cts.Token, n => { if (n == 0) cts.Cancel(); }).ToArray());
+        Assert.Equal(0, tiles);
+        Assert.Equal(3, limiter.Free);
+        Assert.Throws<OperationCanceledException>(() => db.PlanCuts(null, null, 3, null, cts.Token));
+    }
+
+    [Fact]
+    public void MetadataCuts_MultiFile_AndSingleHugeFile_EqualReference()
+    {
+        foreach (bool compacted in new[] { false, true })
+        {
+            using var t = new TempDb();
+            using var db = t.Open(new ScanLimiter(64));
+            ImportInChunks(db, SkewedWords(), 6);
+            if (compacted) db.Compact();
+            var expected = db.LengthDistributionReference().ToArray();
+
+            var cuts = db.PlanCuts(null, null, 3, 1, default);
+            Assert.NotEmpty(cuts);                                        // the 1-byte target cuts at file / length boundaries
+            if (compacted)
+            {
+                // One big file: only the probes can split it, and only within the budget.
+                Assert.InRange(db.LastPlanProbeRanges, 1, WordlistDatabase.MaxPlanProbeRanges);
+                var probed = db.PlanCuts(null, null, 3, 20_000, default);
+                Assert.True(probed.Count > 3, $"expected the probes to split the single file, got {probed.Count} cuts");
+            }
+            int tiles = 0;
+            db.TileHook = _ => Interlocked.Increment(ref tiles);
+            foreach (long? target in new long?[] { null, 1, 20_000 })
+                Assert.Equal(expected, db.LengthDistributionCore(3, 0, target, default, null).ToArray());
+            Assert.True(tiles > 0);
+        }
+    }
+
+    [Fact]
+    public void Planning_RespectsTileCap_AndProbeBudget()
+    {
+        int savedTiles = WordlistDatabase.MaxPlanTiles, savedProbe = WordlistDatabase.MaxPlanProbeRanges;
+        try
+        {
+            using var t = new TempDb();
+            using var db = t.Open(new ScanLimiter(8));
+            ImportInChunks(db, SkewedWords(), 6);
+            db.Compact();
+            var expected = db.LengthDistributionReference().ToArray();
+
+            WordlistDatabase.MaxPlanTiles = 4;
+            Assert.True(db.PlanCuts(null, null, 8, 1, default).Count <= 3);
+            int tiles = 0;
+            db.TileHook = _ => Interlocked.Increment(ref tiles);
+            Assert.Equal(expected, db.LengthDistributionCore(8, 0, 1, default, null).ToArray());
+            Assert.True(tiles <= 4, $"{tiles} tiles with a cap of 4");
+
+            WordlistDatabase.MaxPlanTiles = 512;
+            WordlistDatabase.MaxPlanProbeRanges = 20;
+            db.PlanCuts(null, null, 8, 1, default);
+            Assert.True(db.LastPlanProbeRanges <= 20, $"{db.LastPlanProbeRanges} probe ranges with a budget of 20");
+            Assert.Equal(expected, db.LengthDistributionCore(8, 0, 1, default, null).ToArray());
+        }
+        finally { WordlistDatabase.MaxPlanTiles = savedTiles; WordlistDatabase.MaxPlanProbeRanges = savedProbe; }
     }
 
     [Fact]
