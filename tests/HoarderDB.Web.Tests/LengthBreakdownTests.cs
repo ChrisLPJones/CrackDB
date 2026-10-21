@@ -531,9 +531,28 @@ public class BreakdownL0GuardTests
     }
 
     [Fact]
-    public void JobQueue_MapsGuardToFixedMessage()
+    public async Task Queue_FailsJobWithFixedMessage_AndKeepsExistingSidecar()
     {
-        var src = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "../../../../../src/HoarderDB.Web/Jobs/JobQueue.cs"));
-        Assert.Contains("BreakdownNeedsCompactionException => \"Compact the database first.\"", src);
+        using var f = new HoarderDbWebFactory(1000, null, null, null, null, null, null);
+        _ = f.CreateClient();   // start the host
+        var dbs = f.Services.GetRequiredService<IDbManager>();
+        var queue = f.Services.GetRequiredService<JobQueue>();
+        var reg = f.Services.GetRequiredService<JobRegistry>();
+        var store = f.Services.GetRequiredService<ILengthBreakdownStore>();
+        var db = HoarderDbWebFactory.DbName;
+        var file = Path.Combine(f.Root, db, LengthBreakdownStore.FileName);
+        store.Save(db, DateTimeOffset.UtcNow.AddHours(-1), [new LengthCount(2, 7)]);
+        var before = File.ReadAllBytes(file);
+
+        using (var lease = dbs.AcquireRead(db)) lease.Db.L0PropertyHook = () => "65";
+        var job = new Job(JobKind.Breakdown, db, null);
+        queue.Enqueue(job);
+        JobSnapshot snap = job.Snapshot();
+        for (int i = 0; i < 2400 && snap.Status is "queued" or "running"; i++) { await Task.Delay(25); snap = job.Snapshot(); }
+
+        Assert.Equal("failed", snap.Status);
+        Assert.Equal("Compact the database first.", snap.Error);
+        Assert.Equal(before, File.ReadAllBytes(file));
+        Assert.Equal([new LengthCount(2, 7)], store.Load(db)!.Lengths);
     }
 }
