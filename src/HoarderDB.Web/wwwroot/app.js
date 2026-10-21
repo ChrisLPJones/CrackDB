@@ -65,7 +65,7 @@ async function loadSize() {
   const wanted = db();
   try {
     const s = await api('/api/dbs/' + enc(wanted) + '/stats?full=false');
-    if (db() === wanted) { bdEst = Number(s.estimatedCount) || 0; show('size', fmt(s.estimatedCount) + ' passwords (approximate)'); renderBdButton(); }
+    if (db() === wanted) { show('size', fmt(s.estimatedCount) + ' passwords (approximate)'); renderBdButton(); }
   } catch (e) { if (db() === wanted) fail('size', e); }
 }
 
@@ -141,7 +141,6 @@ async function loadHistory() {
 // ---- length breakdown: the server stores the last exact result (recomputed after the Sunday compaction);
 // the button queues a scan job. Nothing carries over between databases. ----
 
-let bdEst = 0;   // approximate entry count of the current db, for scan progress text
 let bd = { db: '', loaded: false, hasStored: false, activeId: null, posting: false, note: '' };
 const bdOpen = () => document.querySelector('#stats-panel details').open;
 const bdJob = () => lastJobs.find((j) => j.kind === 'breakdown' && j.db === db() && !TERMINAL.includes(j.status));
@@ -169,7 +168,6 @@ function renderLengths(lengths) {
 
 function resetBreakdown() {
   bd = { db: db(), loaded: false, hasStored: false, activeId: null, posting: false, note: '' };
-  bdEst = 0;
   show('stats', '');
   show('statsasof', '');
   renderBdButton();
@@ -214,7 +212,8 @@ function renderBdButton() {
       const ahead = runningJob();
       t = ahead ? 'Queued, waiting for ' + verbing(ahead) + ' of ' + ahead.db + ' to finish.' : 'Queued.';
     } else {
-      t = 'Scanning: ' + fmt(job.scannedCount) + (bdEst > 0 ? ' of about ' + fmt(bdEst) : '') + ' entries';
+      // No total: the db's estimated key count can be several times too high, so a wrong "of about N" is worse than none.
+      t = job.scannedCount > 0 ? 'Scanning: ' + fmt(job.scannedCount) + ' entries so far' : 'Planning the scan (nothing counted yet)...';
     }
     $('statsjobtext').textContent = t;
     line.hidden = false;

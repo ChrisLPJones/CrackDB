@@ -80,107 +80,196 @@ public sealed partial class WordlistDatabase
 
     // ---- Cut planning -----------------------------------------------------------------------------
 
-    private ulong ApproximateSize(byte[] start, byte[]? end)
+    /// <summary>
+    /// Planning never walks the keys: a seek or approximate-size call that touches a huge SST file re-reads that
+    /// file's whole index block (hundreds of MB for a 70 GB file, never cacheable in the 256 MB block cache), so
+    /// the old one-seek-per-length plan took over an hour on a 440 GB db. Cuts now come from the live-file
+    /// metadata (key bounds and size per file, no I/O), and at most MaxPlanProbeRanges approximate-size ranges
+    /// are spent splitting files that are still far bigger than a tile.
+    /// </summary>
+    internal static int MaxPlanTiles = 512;
+    internal static int MaxPlanProbeRanges = 192;
+
+    /// <summary>Approximate-size ranges the last PlanCuts spent (test/diagnostic).</summary>
+    internal int LastPlanProbeRanges;
+
+    internal readonly record struct LiveFile(byte[] Smallest, byte[] Largest, long Size);
+
+    // Binary-safe key bounds straight from the native live-file list (the managed GetLiveFilesMetadata wrapper turns
+    // keys into strings, which would mangle the NUL bytes of the length prefix).
+    private List<LiveFile> LiveFiles()
     {
-        // End null = past the last possible length prefix; 0xFF * 8 sorts after any realistic key.
-        end ??= new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-        IntPtr sk = Marshal.AllocHGlobal(start.Length), ek = Marshal.AllocHGlobal(end.Length);
-        IntPtr arr = Marshal.AllocHGlobal(IntPtr.Size * 2), lens = Marshal.AllocHGlobal(IntPtr.Size * 2), sizes = Marshal.AllocHGlobal(8);
+        var files = new List<LiveFile>();
+        var native = Native.Instance;
+        IntPtr lf = native.rocksdb_livefiles(_db.Handle);
+        if (lf == IntPtr.Zero) return files;
         try
         {
-            Marshal.Copy(start, 0, sk, start.Length);
-            Marshal.Copy(end, 0, ek, end.Length);
-            Marshal.WriteIntPtr(arr, 0, sk);        // start_keys[0]
-            Marshal.WriteIntPtr(arr, IntPtr.Size, ek);   // limit_keys[0]
-            Marshal.WriteIntPtr(lens, 0, (IntPtr)start.Length);
-            Marshal.WriteIntPtr(lens, IntPtr.Size, (IntPtr)end.Length);
-            Marshal.WriteInt64(sizes, 0);
-            Native.Instance.rocksdb_approximate_sizes(_db.Handle, 1,
-                arr, lens, arr + IntPtr.Size, lens + IntPtr.Size, sizes);
-            return (ulong)Marshal.ReadInt64(sizes);
+            int n = native.rocksdb_livefiles_count(lf);
+            for (int i = 0; i < n; i++)
+            {
+                var lo = ReadKey((IntPtr l, int ix, out UIntPtr sz) => native.rocksdb_livefiles_smallestkey(l, ix, out sz), lf, i);
+                var hi = ReadKey((IntPtr l, int ix, out UIntPtr sz) => native.rocksdb_livefiles_largestkey(l, ix, out sz), lf, i);
+                if (lo.Length > 0 && hi.Length > 0) files.Add(new LiveFile(lo, hi, (long)(ulong)native.rocksdb_livefiles_size(lf, i)));
+            }
         }
-        finally
-        {
-            Marshal.FreeHGlobal(sk); Marshal.FreeHGlobal(ek); Marshal.FreeHGlobal(arr); Marshal.FreeHGlobal(lens); Marshal.FreeHGlobal(sizes);
-        }
+        finally { native.rocksdb_livefiles_destroy(lf); }
+        return files;
     }
 
-    // Distinct values of the byte following `parent` among the keys that start with it (seek-hopping, so the
-    // cost is one seek per distinct byte, not per key). Only used on big prefixes.
-    private List<byte> HopNextBytes(byte[] parent, Snapshot snapshot, CancellationToken ct)
+    private delegate IntPtr KeyGetter(IntPtr lf, int index, out UIntPtr size);
+
+    private static byte[] ReadKey(KeyGetter get, IntPtr lf, int index)
     {
-        var found = new List<byte>();
-        using var ro = new ScanReadOptions(0, null, snapshot);
-        using var it = _db.NewIterator(readOptions: ro.Options);
-        it.Seek(parent);
-        while (it.Valid())
+        IntPtr p = get(lf, index, out var len);
+        if (p == IntPtr.Zero || len == UIntPtr.Zero) return Array.Empty<byte>();
+        var b = new byte[(int)len];
+        Marshal.Copy(p, b, 0, b.Length);
+        return b;
+    }
+
+    // Prefix of a key's length field (4 bytes) as a cut key, or null for a key too short to carry one.
+    private static byte[]? PrefixOf(byte[] key) => key.Length < 4 ? null : key[..4];
+
+    /// <summary>
+    /// Approximate on-disk sizes of many [start, limit) ranges in as few native calls as possible (chunks of 16 so
+    /// cancellation is checked between them).
+    /// </summary>
+    private ulong[] ApproximateSizes(IReadOnlyList<(byte[] start, byte[] limit)> ranges, CancellationToken ct)
+    {
+        var result = new ulong[ranges.Count];
+        for (int off = 0; off < ranges.Count; off += 16)
         {
             ct.ThrowIfCancellationRequested();
-            var key = it.GetKeySpan();
-            if (key.Length <= parent.Length)
+            int n = Math.Min(16, ranges.Count - off);
+            var ptrs = new List<IntPtr>();
+            IntPtr starts = Marshal.AllocHGlobal(IntPtr.Size * n), limits = Marshal.AllocHGlobal(IntPtr.Size * n);
+            IntPtr sl = Marshal.AllocHGlobal(IntPtr.Size * n), ll = Marshal.AllocHGlobal(IntPtr.Size * n), sizes = Marshal.AllocHGlobal(8 * n);
+            try
             {
-                if (key.Length == parent.Length && key.SequenceEqual(parent)) { it.Next(); continue; }   // the bare prefix itself
-                break;
+                IntPtr Copy(byte[] b) { var p = Marshal.AllocHGlobal(Math.Max(1, b.Length)); Marshal.Copy(b, 0, p, b.Length); ptrs.Add(p); return p; }
+                for (int i = 0; i < n; i++)
+                {
+                    var (s, l) = ranges[off + i];
+                    Marshal.WriteIntPtr(starts, i * IntPtr.Size, Copy(s));
+                    Marshal.WriteIntPtr(limits, i * IntPtr.Size, Copy(l));
+                    Marshal.WriteIntPtr(sl, i * IntPtr.Size, (IntPtr)s.Length);
+                    Marshal.WriteIntPtr(ll, i * IntPtr.Size, (IntPtr)l.Length);
+                    Marshal.WriteInt64(sizes, i * 8, 0);
+                }
+                Native.Instance.rocksdb_approximate_sizes(_db.Handle, n, starts, sl, limits, ll, sizes);
+                for (int i = 0; i < n; i++) result[off + i] = (ulong)Marshal.ReadInt64(sizes, i * 8);
             }
-            if (!key.StartsWith(parent)) break;
-            byte b = key[parent.Length];
-            found.Add(b);
-            if (b == 0xFF) break;
-            var next = new byte[parent.Length + 1];
-            parent.CopyTo(next, 0);
-            next[parent.Length] = (byte)(b + 1);
-            it.Seek(next);
+            finally
+            {
+                foreach (var p in ptrs) Marshal.FreeHGlobal(p);
+                Marshal.FreeHGlobal(starts); Marshal.FreeHGlobal(limits); Marshal.FreeHGlobal(sl); Marshal.FreeHGlobal(ll); Marshal.FreeHGlobal(sizes);
+            }
         }
-        return found;
+        return result;
+    }
+
+    // Picks, from candidates (key, cumulative bytes from the anchor) in key order, a cut each time the cumulative size
+    // has grown by `target` since the previous cut.
+    private static void PickBySize(List<(byte[] key, ulong cum)> candidates, long target, List<byte[]> cuts)
+    {
+        ulong last = 0, run = 0;
+        foreach (var (key, c) in candidates)
+        {
+            run = Math.Max(run, c);                       // approximate sizes need not be monotonic
+            if (run - last >= (ulong)Math.Max(1, target)) { cuts.Add(key); last = run; }
+        }
     }
 
     /// <summary>
-    /// Picks cut keys for [start, end): one at every present length (found by seek-hopping), and for a length
-    /// that holds more than `splitBytes` of data, one per present first password byte, and once more per second
-    /// byte when a first-byte slice is still that big. Sizes are RocksDB's approximate on-disk sizes: wrong
-    /// guesses only unbalance the tiles, never the result.
+    /// Picks cut keys for [start, end) from the live-file metadata: a cut at a file's smallest key whenever
+    /// `target` bytes of files have gone by (target = total / (threads * 8) unless overridden), plus the length
+    /// prefix of every file's smallest and largest key (free, and it lets a tile that sits inside one length be
+    /// counted without reading keys). A file much bigger than a tile is split at length boundaries (and, inside a
+    /// bigger length, at first password bytes) by approximate-size probes, at most MaxPlanProbeRanges in all.
+    /// At most MaxPlanTiles - 1 cuts come back. Wrong guesses only unbalance the tiles, never the result.
     /// </summary>
-    internal List<byte[]> PlanCuts(byte[]? start, byte[]? end, long splitBytes, Snapshot snapshot, CancellationToken ct)
+    internal List<byte[]> PlanCuts(byte[]? start, byte[]? end, int threads, long? targetOverride, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        LastPlanProbeRanges = 0;
+        var files = LiveFiles()
+            .Where(f => (start == null || Compare(f.Largest, start) >= 0) && (end == null || Compare(f.Smallest, end) < 0))
+            .OrderBy(f => f.Smallest, Comparer<byte[]>.Create(Compare)).ToList();
         var cuts = new List<byte[]>();
-        var lengths = new List<(byte[] prefix, byte[]? next)>();
-        using (var ro = new ScanReadOptions(0, null, snapshot))
-        using (var it = _db.NewIterator(readOptions: ro.Options))
+        if (files.Count == 0) return cuts;
+
+        long total = files.Sum(f => f.Size);
+        long target = targetOverride is > 0 ? targetOverride.Value : Math.Max(1, total / Math.Max(1, threads * 8L));
+
+        long acc = 0;
+        foreach (var f in files)
         {
-            if (start == null) it.SeekToFirst(); else it.Seek(start);
-            while (it.Valid())
-            {
-                ct.ThrowIfCancellationRequested();
-                var key = it.GetKeySpan();
-                if (key.Length < 4) break;                                   // not a key of this layout: leave it to the tiles
-                if (end != null && key.SequenceCompareTo(end) >= 0) break;
-                var prefix = key[..4].ToArray();
-                var next = NextLengthPrefix(BinaryPrimitives.ReadInt32BigEndian(prefix));
-                lengths.Add((prefix, next));
-                if (next == null) break;
-                it.Seek(next);
-            }
+            if (acc >= target) { cuts.Add(f.Smallest); acc = 0; }
+            acc += f.Size;
+        }
+        foreach (var f in files)
+        {
+            if (PrefixOf(f.Smallest) is { } a) cuts.Add(a);
+            if (PrefixOf(f.Largest) is { } b) cuts.Add(b);
         }
 
-        foreach (var (prefix, next) in lengths)
+        // Split the oversized files (biggest first) while the probe budget lasts.
+        int budget = MaxPlanProbeRanges;
+        foreach (var f in files.Where(f => f.Size > 2 * target).OrderByDescending(f => f.Size))
         {
-            cuts.Add(prefix);
-            if (splitBytes <= 0) continue;
-            if (ApproximateSize(prefix, next) <= (ulong)splitBytes) continue;
-            foreach (byte b1 in HopNextBytes(prefix, snapshot, ct))
-            {
-                var p1 = new byte[5]; prefix.CopyTo(p1, 0); p1[4] = b1;
-                cuts.Add(p1);
-                byte[]? p1End = b1 == 0xFF ? next : new[] { prefix[0], prefix[1], prefix[2], prefix[3], (byte)(b1 + 1) };
-                if (ApproximateSize(p1, p1End) <= (ulong)splitBytes) continue;
-                foreach (byte b2 in HopNextBytes(p1, snapshot, ct))
-                {
-                    var p2 = new byte[6]; p1.CopyTo(p2, 0); p2[5] = b2;
-                    cuts.Add(p2);
-                }
-            }
+            if (budget <= 0) break;
+            ProbeFile(f, target, cuts, ref budget, ct);
         }
-        return cuts;
+        LastPlanProbeRanges = MaxPlanProbeRanges - budget;
+
+        // Dedup, and thin evenly if over the cap (the thinned-out cuts only make tiles bigger).
+        var sorted = cuts.Where(c => (start == null || Compare(c, start) > 0) && (end == null || Compare(c, end) < 0)).ToList();
+        sorted.Sort(Compare);
+        var distinct = new List<byte[]>();
+        foreach (var c in sorted) if (distinct.Count == 0 || Compare(distinct[^1], c) != 0) distinct.Add(c);
+        int cap = Math.Max(0, MaxPlanTiles - 1);
+        if (distinct.Count > cap)
+        {
+            var thin = new List<byte[]>(cap);
+            for (int i = 0; i < cap; i++) thin.Add(distinct[(int)((long)i * distinct.Count / cap)]);
+            distinct = thin;
+        }
+        return distinct;
+    }
+
+    internal void ProbeFile(LiveFile f, long target, List<byte[]> cuts, ref int budget, CancellationToken ct)
+    {
+        if (f.Smallest.Length < 4 || f.Largest.Length < 4) return;
+        uint lo = BinaryPrimitives.ReadUInt32BigEndian(f.Smallest), hi = BinaryPrimitives.ReadUInt32BigEndian(f.Largest);
+        if (hi <= lo || hi - lo > (uint)Math.Min(budget - 1, 128)) return;     // one length, or too many to probe cheaply
+
+        // Level 1: sizes of [smallest, prefix(L)) for each length boundary L in (lo, hi], plus the whole file.
+        var ranges = new List<(byte[] start, byte[] limit)>();
+        for (ulong l = (ulong)lo + 1; l <= hi; l++) { var p = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(p, (uint)l); ranges.Add((f.Smallest, p)); }
+        var whole = new byte[f.Largest.Length + 1]; f.Largest.CopyTo(whole, 0);
+        ranges.Add((f.Smallest, whole));
+        budget -= ranges.Count;
+        var cum = ApproximateSizes(ranges, ct);
+
+        var cand = new List<(byte[] key, ulong cum)>();
+        for (int i = 0; i < ranges.Count - 1; i++) cand.Add((ranges[i].limit, cum[i]));
+        PickBySize(cand, target, cuts);
+
+        // Level 2: a length that alone holds more than two tiles is split on its first password byte (printable range).
+        for (int i = 0; i < ranges.Count - 2; i++)
+        {
+            ulong gap = Math.Max(cum[i + 1], cum[i]) - cum[i];
+            if (gap <= (ulong)(2 * target) || budget < 97) continue;
+            var anchor = ranges[i].limit;                                   // prefix(L): the length starts here
+            var r2 = new List<(byte[] start, byte[] limit)>();
+            for (int b = 0x20; b <= 0x7F; b++) { var p = new byte[5]; anchor.CopyTo(p, 0); p[4] = (byte)b; r2.Add((anchor, p)); }
+            budget -= r2.Count;
+            var c2 = ApproximateSizes(r2, ct);
+            var cand2 = new List<(byte[] key, ulong cum)>();
+            for (int k = 0; k < r2.Count; k++) cand2.Add((r2[k].limit, c2[k]));
+            PickBySize(cand2, target, cuts);
+        }
     }
 
     // ---- Parallel engine --------------------------------------------------------------------------
@@ -266,13 +355,6 @@ public sealed partial class WordlistDatabase
         return states;
     }
 
-    // Reference threshold: a length bigger than total / (threads * 8) is split on password bytes.
-    private long SplitThreshold(int threads)
-    {
-        ulong total = ApproximateSize(new byte[4], null);
-        return total == 0 ? 0 : (long)(total / (ulong)(threads * 8L));
-    }
-
     private int EffectiveThreads(int? requested) => Math.Max(1, Math.Min(requested ?? _scanLimiter.Cap, _scanLimiter.Cap));
 
     // ---- CountRange -------------------------------------------------------------------------------
@@ -325,7 +407,7 @@ public sealed partial class WordlistDatabase
     {
         ct.ThrowIfCancellationRequested();
         using var snapshot = _db.CreateSnapshot();
-        var cuts = PlanCuts(start, end, splitBytesOverride ?? SplitThreshold(threads), snapshot, ct);
+        var cuts = PlanCuts(start, end, threads, splitBytesOverride, ct);
         var tiles = MakeTiles(cuts, start, end);
         var states = RunTiles(tiles, threads, ct, null, snapshot, () => new long[1], (acc, tile, ctx) =>
         {
@@ -379,8 +461,11 @@ public sealed partial class WordlistDatabase
 
     private (int length, long count)[] LengthDistributionParallel(int threads, long? splitBytesOverride, CancellationToken ct, Action<long>? progress)
     {
+        // Visible life sign before planning: the first report (0 keys) lets a caller show a "planning" phase.
+        progress?.Invoke(0);
+        ct.ThrowIfCancellationRequested();
         using var snapshot = _db.CreateSnapshot();
-        var cuts = PlanCuts(null, null, splitBytesOverride ?? SplitThreshold(threads), snapshot, ct);
+        var cuts = PlanCuts(null, null, threads, splitBytesOverride, ct);
         var tiles = MakeTiles(cuts, null, null);
         var states = RunTiles(tiles, threads, ct, progress, snapshot, () => new Dictionary<int, long>(), (acc, tile, ctx) =>
         {
