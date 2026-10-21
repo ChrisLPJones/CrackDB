@@ -32,3 +32,6 @@ public sealed class DbLimitReachedException(string message) : Exception(message)
 
 /// <summary>A backfill batch would push a database's import history past its entry cap (HTTP 413); rejected whole, not truncated.</summary>
 public sealed class ImportHistoryCapExceededException(string message) : Exception(message);
+
+/// <summary>The length-breakdown sidecar could not be written (job fails with a fixed message; the previous result stays).</summary>
+public sealed class BreakdownSaveException(string message, Exception? inner = null) : Exception(message, inner);

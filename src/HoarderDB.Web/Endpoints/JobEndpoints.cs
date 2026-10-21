@@ -24,6 +24,7 @@ public static class JobEndpoints
 
     public sealed record ImportRequest(string? Db, string? Source, int? Min, int? Max, bool? Force = null);
     public sealed record CompactRequest(string? Db);
+    public sealed record BreakdownRequest(string? Db);
 
     public static void MapJobs(this IEndpointRouteBuilder app)
     {
@@ -48,6 +49,19 @@ public static class JobEndpoints
         {
             data.ResolveExisting(req.Db);                          // 404 if the db is missing
             var job = new Job(JobKind.Compact, req.Db!, null);
+            queue.Enqueue(job);
+            return Accepted(job);
+        });
+
+        // Queues the full length scan (the same job the weekly compaction schedules). Idempotent: a queued or
+        // running scan of this db is returned instead of stacking another. Queues behind a running import.
+        jobs.MapPost("/length-breakdown", (BreakdownRequest req, DataRootResolver data, JobRegistry reg, JobQueue queue) =>
+        {
+            data.ResolveExisting(req.Db);                          // 400 / 404
+            var existing = reg.List().FirstOrDefault(j =>
+                j.Kind == "breakdown" && j.Db == req.Db && j.Status is "queued" or "running");
+            if (existing != null) return Results.Json(new { id = existing.Id }, statusCode: StatusCodes.Status202Accepted);
+            var job = new Job(JobKind.Breakdown, req.Db!, null);
             queue.Enqueue(job);
             return Accepted(job);
         });

@@ -58,10 +58,26 @@ public static class ApiEndpoints
             using var lease = dbs.AcquireRead(name);
             var isFull = full == true;
             // TODO(P3): move to job system. A full scan holds this request for a long time on a huge DB.
+            // Script-only: the UI uses GET /dbs/{name}/length-breakdown (stored) + POST /api/jobs/length-breakdown.
+            // This stays a live, slow scan and never writes the stored breakdown (single writer = the job queue).
             var lengths = isFull
                 ? lease.Db.LengthDistribution().Select(x => new { length = x.length, count = x.count }).ToList()
                 : null;
             return Results.Ok(new { name, estimatedCount = lease.Db.EstimatedCount(), full = isFull, lengths });
+        });
+
+        // Stored length breakdown (counts + timestamp only): reads the sidecar, no DbLease, so it works (and never
+        // 409s) during an import. 200 with both fields null = never computed. An empty list is a valid result.
+        api.MapGet("/dbs/{name}/length-breakdown", (string name, DataRootResolver data, ILengthBreakdownStore store) =>
+        {
+            data.ResolveExisting(name);                       // 400 bad name / 404 missing
+            var b = store.Load(name);
+            return Results.Ok(new
+            {
+                name,
+                asOf = b?.AsOf,
+                lengths = b?.Lengths.Select(l => new { length = l.Length, count = l.Count }).ToList(),
+            });
         });
 
         api.MapGet("/dbs/{name}/count", (string name, int? min, int? max, int? length, IDbManager dbs) =>

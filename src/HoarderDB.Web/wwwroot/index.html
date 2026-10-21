@@ -159,8 +159,10 @@
       <p class="hint">Databases are compacted automatically every Sunday at 00:00 in the server's configured time zone (Australia/Sydney by default).</p>
       <div id="size" class="result"></div>
       <h3>Full length breakdown</h3>
-      <p class="hint">Exact count per password length. This scans the whole database, so it can take a while on large ones.</p>
-      <div class="actions"><button id="statsbtn" class="primary" type="button">Load full breakdown</button></div>
+      <p class="hint">Exact count per password length, recomputed automatically after the Sunday compaction. A scan reads the whole database and can take a long time on large ones.</p>
+      <div class="actions"><button id="statsbtn" class="primary" type="button" disabled>Initialize breakdown</button></div>
+      <p id="statsjob" class="hint" hidden><span id="statsjobtext"></span> <button id="statscancel" class="danger" type="button">Cancel scan</button></p>
+      <p id="statsasof" class="hint"></p>
       <div id="stats" class="result"></div>
     </details>
   </section>

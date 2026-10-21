@@ -144,6 +144,34 @@ public class WordlistDatabaseTests
     }
 
     [Fact]
+    public void LengthDistribution_PreCancelledTokenThrows()
+    {
+        using var t = new TempDb();
+        using var db = Seed(t);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        Assert.Throws<OperationCanceledException>(() => db.LengthDistribution(cts.Token).ToArray());
+    }
+
+    [Fact]
+    public void LengthDistribution_ReportsProgressAndCancelsMidScan()
+    {
+        using var t = new TempDb();
+        using var db = t.Open();
+        var words = Enumerable.Range(0, WordlistDatabase.ScanCheckInterval * 2 + 10).Select(i => "w" + i);
+        db.Import(words, null, null, threads: 2);
+        var seen = new List<long>();
+        var dist = db.LengthDistribution(default, seen.Add).ToArray();
+        Assert.Equal(WordlistDatabase.ScanCheckInterval * 2 + 10, dist.Sum(d => d.count));
+        Assert.True(seen.Count >= 2, "progress should fire at least once per interval");
+        Assert.Equal(dist.Sum(d => d.count), seen[^1]);
+
+        using var cts = new CancellationTokenSource();
+        Assert.Throws<OperationCanceledException>(() =>
+            db.LengthDistribution(cts.Token, n => cts.Cancel()).ToArray());
+    }
+
+    [Fact]
     public void EstimatedCount_IncreasesAfterImport()
     {
         using var t = new TempDb();

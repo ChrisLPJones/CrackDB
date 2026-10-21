@@ -322,13 +322,21 @@ public sealed class WordlistDatabase : IDisposable
         return count;
     }
 
-    /// <summary>Exact (length, count) pairs, ordered by length (full scan).</summary>
-    public IEnumerable<(int length, long count)> LengthDistribution()
+    /// <summary>Keys between cancellation checks / progress callbacks in <see cref="LengthDistribution"/>.</summary>
+    public const int ScanCheckInterval = 65_536;
+
+    /// <summary>
+    /// Exact (length, count) pairs, ordered by length (full scan). The scan checks <paramref name="ct"/> and
+    /// reports the number of keys read to <paramref name="progress"/> every <see cref="ScanCheckInterval"/> keys
+    /// (a cancelled token throws <see cref="OperationCanceledException"/>), so a multi-hour scan can be stopped.
+    /// </summary>
+    public IEnumerable<(int length, long count)> LengthDistribution(CancellationToken ct = default, Action<long>? progress = null)
     {
+        ct.ThrowIfCancellationRequested();
         using var it = _db.NewIterator();
         it.SeekToFirst();
         int current = -1;
-        long count = 0;
+        long count = 0, scanned = 0;
         while (it.Valid())
         {
             int len = BinaryPrimitives.ReadInt32BigEndian(it.Key());
@@ -339,8 +347,14 @@ public sealed class WordlistDatabase : IDisposable
                 count = 0;
             }
             count++;
+            if (++scanned % ScanCheckInterval == 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                progress?.Invoke(scanned);
+            }
             it.Next();
         }
+        progress?.Invoke(scanned);
         if (current >= 0) yield return (current, count);
     }
 
