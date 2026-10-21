@@ -118,7 +118,7 @@ input.visually-hidden, .visually-hidden { position: absolute; width: 1px; height
 #hist .sortbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #hist .sortind { display: inline-block; min-width: 1em; margin-left: 2px; font-size: .75em; }
 /* Long queues scroll inside the box; the heading stays above it. */
-.queuebox ul { max-height: 12rem; overflow-y: auto; }
+.queuebox ul { max-height: 12rem; overflow-y: auto; padding-right: 12px; }
 
 /* Long unbroken text (a 300-character search term, a long file name) wraps inside its box instead of widening the page. */
 .jobhead strong { min-width: 0; overflow-wrap: anywhere; }

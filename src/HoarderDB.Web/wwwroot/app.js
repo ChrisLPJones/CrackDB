@@ -432,10 +432,10 @@ function renderJob(j) {
   else bar.removeAttribute('value');   // indeterminate
   if (j.status === 'completed' && j.kind === 'import') bar.value = 100;
   const rows = j.kind === 'import' ? [
-    ['Source', j.source || '-'],
+    ['Source', histName(j) || '-'],
     ['Lines read', fmt(j.linesRead)],
     ['Bytes', fmtBytes(j.bytesRead) + ' / ' + fmtBytes(j.bytesTotal)],
-    ['New entries (approx)', '~' + fmt(j.estNewEntries)],
+    ['New entries (approx)', fmt(j.estNewEntries)],
     ['Elapsed', fmtElapsed(j)],
   ] : [['Elapsed', fmtElapsed(j)]];
   $('jobstats').replaceChildren(...rows.flatMap(([k, v]) => {
