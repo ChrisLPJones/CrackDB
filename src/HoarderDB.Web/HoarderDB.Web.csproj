@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <RootNamespace>HoarderDB.Web</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Workstation, non-concurrent GC: measured ~100 MB lower peak than server GC at the same import time; managed heap is minor here. Web only (Cli/Core unchanged). -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

@@ -48,6 +48,7 @@ services.AddSingleton<IValidateOptions<CompactionOptions>, CompactionOptionsVali
 
 // Storage
 services.AddSingleton<DataRootResolver>();
+services.AddSingleton<IStorageDiagnostics, StorageDiagnostics>();
 services.AddSingleton<DbManager>();
 services.AddSingleton<IDbManager>(sp => sp.GetRequiredService<DbManager>());
 services.AddHostedService(sp => sp.GetRequiredService<DbManager>());   // StopAsync closes every handle

@@ -28,6 +28,9 @@ public sealed partial class WordlistDatabase : IDisposable
     /// <summary>The memory plan this handle was opened with (write buffers, import pipeline sizes).</summary>
     public MemoryPlan Plan => _plan;
 
+    /// <summary>The <c>max_subcompactions</c> this handle was opened with (bulk opens do not set it).</summary>
+    public int MaxSubcompactions { get; }
+
     // Fixed, operator-level bounds on RocksDB's baseline memory, independent of ImportMemoryMb and
     // never client/request-configurable. Without these, index/filter block memory and open
     // file-handle/table-reader overhead are unbounded by default and grow with the number of SST
@@ -58,11 +61,16 @@ public sealed partial class WordlistDatabase : IDisposable
     /// <param name="scanLimiter">
     /// Process-wide scan-thread budget (<c>Storage:ScanThreads</c>): caps the worker threads of parallel
     /// scans (<see cref="LengthDistribution"/>, <see cref="CountRange"/>) and sets RocksDB's
-    /// <c>max_subcompactions</c> on non-bulk opens. Null = <see cref="ScanLimiter.Default"/> (cores - 1).
+    /// <c>max_subcompactions</c> no longer follows it. Null = <see cref="ScanLimiter.Default"/> (cores - 1).
+    /// </param>
+    /// <param name="maxSubcompactions">
+    /// RocksDB <c>max_subcompactions</c> on non-bulk opens (<c>Storage:MaxSubcompactions</c>). Default 1: each extra
+    /// subcompaction holds more input index blocks in memory (measured 1.2-1.7x at 3). Clamped to 1..<see cref="ScanLimiter.MaxCap"/>.
     /// </param>
     public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false, long? memoryBudgetBytes = null,
-        bool enableAutoCompaction = true, ScanLimiter? scanLimiter = null)
+        bool enableAutoCompaction = true, ScanLimiter? scanLimiter = null, int maxSubcompactions = 1)
     {
+        MaxSubcompactions = Math.Clamp(maxSubcompactions, 1, ScanLimiter.MaxCap);
         _enc = encoding;
         _scanLimiter = scanLimiter ?? ScanLimiter.Default;
 
@@ -120,7 +128,7 @@ public sealed partial class WordlistDatabase : IDisposable
             if (!enableAutoCompaction) options.SetDisableAutoCompactions(1);
             // Lets one manual/auto compaction split its key range across several threads (the default
             // is 1 = one core). Not for bulk opens: an import never compacts. RocksDbSharp has no managed setter.
-            Native.Instance.rocksdb_options_set_max_subcompactions(options.Handle, (uint)_scanLimiter.Cap);
+            Native.Instance.rocksdb_options_set_max_subcompactions(options.Handle, (uint)MaxSubcompactions);
         }
 
         _db = RocksDb.Open(options, path);
@@ -161,6 +169,16 @@ public sealed partial class WordlistDatabase : IDisposable
         var s = _db.GetProperty("rocksdb.num-files-at-level0");
         return long.TryParse(s, out var n) ? n : 0;
     }
+
+    /// <summary>Total size in bytes of all live SST files (instant; test/diagnostic hook), or -1 if unavailable.</summary>
+    public long TotalSstFilesBytes()
+    {
+        var s = _db.GetProperty("rocksdb.total-sst-files-size");
+        return long.TryParse(s, out var n) ? n : -1;
+    }
+
+    /// <summary>Raw <c>rocksdb.aggregated-table-properties</c> text (diagnostics; parse with <see cref="MemoryDiagnostics"/>), or null.</summary>
+    public string? AggregatedTableProperties() => _db.GetProperty("rocksdb.aggregated-table-properties");
 
     /// <summary>The block cache's configured capacity in bytes, straight from the engine (test/diagnostic hook).</summary>
     public long BlockCacheCapacityBytes()

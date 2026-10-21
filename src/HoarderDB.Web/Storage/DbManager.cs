@@ -85,6 +85,8 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     private readonly int _maxDatabases;
     private readonly long? _memoryBudgetBytes;
     private readonly ScanLimiter _scanLimiter;
+    private readonly int _maxSubcompactions;
+    private readonly IStorageDiagnostics _diag;
     private readonly ILogger? _logger;
     private bool _closed;
 
@@ -92,15 +94,18 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     public const int DefaultMaxDatabases = 512;
 
     public DbManager(DataRootResolver resolver, int maxDatabases = DefaultMaxDatabases,
-        IOptions<StorageOptions>? storage = null, ILogger<DbManager>? logger = null)
+        IOptions<StorageOptions>? storage = null, ILogger<DbManager>? logger = null, IStorageDiagnostics? diagnostics = null)
     {
         _resolver = resolver;
         _maxDatabases = maxDatabases;
         _logger = logger;
+        _diag = diagnostics ?? new StorageDiagnostics(null);
         long mb = storage?.Value.ImportMemoryMb ?? 0;
         _memoryBudgetBytes = mb > 0 ? mb * 1024 * 1024 : null;   // null = engine auto default
         int st = storage?.Value.ScanThreads ?? 0;
         _scanLimiter = new ScanLimiter(st > 0 ? st : ScanLimiter.AutoThreads(Environment.ProcessorCount));   // shared by every handle: one process-wide scan-thread cap
+        int sub = storage?.Value.MaxSubcompactions ?? 0;
+        _maxSubcompactions = sub > 0 ? Math.Min(sub, ScanLimiter.MaxCap) : 1;   // unset/0 = 1 (more subcompactions = more index memory)
     }
 
     public Task CreateAsync(string name, CancellationToken ct) =>
@@ -122,7 +127,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             if (_closed) throw new ObjectDisposedException(nameof(DbManager));
             // The dir may have been deleted between ResolveExisting and here (fresh entry after a delete): never let the always-create ctor resurrect it.
             if (entry.Handle == null && !DataRootResolver.IsDatabaseDir(path)) throw new DbNotFoundException("Database not found.");
-            entry.Handle ??= Open(path, DbOpenMode.Read, entry, enableAutoCompaction: true);
+            entry.Handle ??= Open(path, DbOpenMode.Read, entry, enableAutoCompaction: false);   // a read open never auto-compacts (compaction = compact job / weekly schedule only)
             entry.Readers++;
             return new DbLease(entry, entry.Handle);
         }
@@ -158,12 +163,14 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
                     await Task.Delay(25, ct);
                 }
                 WordlistDatabase db;
-                // The job's own open (import = Bulk, compact = Read): keeps today's behaviour, so an
-                // explicit compact job still runs with auto-compaction enabled on its handle.
-                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry, enableAutoCompaction: true); entry.Writing = true; Monitor.PulseAll(entry.Gate); }
+                // The job's own open (import = Bulk, compact = Read). Auto-compaction is off here too: a manual
+                // CompactRange does not need the auto trigger, so compaction runs only from the compact job.
+                lock (entry.Gate) { db = entry.Handle = Open(path, mode, entry, enableAutoCompaction: false); entry.Writing = true; Monitor.PulseAll(entry.Gate); }
+                _diag.LogHandle("job-start", db, _scanLimiter.Cap);
                 try { return await work(db, ct); }
                 finally
                 {
+                    _diag.LogHandle("job-finish", db, _scanLimiter.Cap);
                     // Always reopen Read (Dispose flushes; WAL is off), even when work failed or was cancelled.
                     // enableAutoCompaction:false here is the fix for the closed loophole: this reopen only
                     // serves reads between queued jobs, so it must not silently re-arm a background
@@ -249,8 +256,10 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         // open (first open and every write-window reopen), never fatal - see ImportHistory.MigrateLegacySidecar.
         ImportHistory.MigrateLegacySidecar(path, _logger);
         var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk,
-            memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction, scanLimiter: _scanLimiter);
+            memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction, scanLimiter: _scanLimiter,
+            maxSubcompactions: _maxSubcompactions);
         entry.Mode = mode;
+        _diag.LogHandle("open", db, _scanLimiter.Cap);
         return db;
     }
 
@@ -266,6 +275,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             "Import memory budget {BudgetMb} MB ({Source}): {Buffers} x {BufferMb} MB write buffers, {Workers} workers, queue {Queue}; scan threads {ScanThreads}",
             budget / (1024 * 1024), _memoryBudgetBytes is null ? "auto" : "configured",
             p.MaxBuffers, p.WriteBuffer / (1024 * 1024), p.Workers, p.QueueCapacity, _scanLimiter.Cap);
+        _diag.LogStartup(_scanLimiter.Cap, _maxSubcompactions);
         return Task.CompletedTask;
     }
     public Task StopAsync(CancellationToken cancellationToken) { CloseAll(); return Task.CompletedTask; }
