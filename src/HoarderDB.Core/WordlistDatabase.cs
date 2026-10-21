@@ -180,7 +180,7 @@ public sealed partial class WordlistDatabase : IDisposable
     public string? AggregatedTableProperties() => _db.GetProperty("rocksdb.aggregated-table-properties");
 
     /// <summary>L0 count for the parallel-scan gate: long.MaxValue (unknown, so single-thread) if the property is unreadable.</summary>
-    internal long NumFilesAtLevel0ForGate() => ParseL0ForGate(L0PropertyHook != null ? L0PropertyHook() : _db.GetProperty("rocksdb.num-files-at-level0"));
+    public long NumFilesAtLevel0ForGate() => ParseL0ForGate(L0PropertyHook != null ? L0PropertyHook() : _db.GetProperty("rocksdb.num-files-at-level0"));
 
     internal static long ParseL0ForGate(string? s) => long.TryParse(s, out var n) && n >= 0 ? n : long.MaxValue;
 

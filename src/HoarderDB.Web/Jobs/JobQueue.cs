@@ -119,12 +119,16 @@ public sealed class JobQueue(
         catch (Exception ex)
         {
             // Full detail goes to the log only; the job carries a fixed message (no paths, no data).
-            log.LogError(ex, "Job {Id} ({Kind} {Db}) failed", job.Id, job.Kind, job.DbName);
+            if (ex is BreakdownNeedsCompactionException)
+                log.LogWarning("Job {Id} ({Kind} {Db}) refused: too many uncompacted L0 files, compact first", job.Id, job.Kind, job.DbName);
+            else
+                log.LogError(ex, "Job {Id} ({Kind} {Db}) failed", job.Id, job.Kind, job.DbName);
             Record(job, JobStatus.Failed);
             job.Finish(JobStatus.Failed, ex switch
             {
                 DbBusyException => "Database is busy.",
                 DbNotFoundException => "Database not found.",
+                BreakdownNeedsCompactionException => "Compact the database first.",
                 BreakdownSaveException => "Could not save the length breakdown.",
                 SourceChangedException => "The source file changed while it was being read.",
                 IOException => "I/O error while reading the source or writing the database.",
