@@ -302,6 +302,23 @@ public sealed class ParallelScanTests : IDisposable
     }
 
     [Fact]
+    public void ProbeFile_TerminatesAtMaxLengthPrefix_AndIgnoresShortKeys()
+    {
+        using var t = new TempDb();
+        using var db = t.Open(new ScanLimiter(2));
+        db.Import(new[] { "abc", "defg" }, null, null, threads: 1);
+        var cuts = new List<byte[]>();
+        int budget = 200;
+        // Largest key prefix FF FF FF FF: a uint loop would wrap to 0 and never end.
+        db.ProbeFile(new WordlistDatabase.LiveFile(new byte[] { 0xFF, 0xFF, 0xFF, 0xF0, 1 }, new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 1 }, 1_000_000), 10, cuts, ref budget, default);
+        Assert.InRange(budget, 0, 199);
+        // Keys shorter than the 4-byte length field are skipped without probing.
+        int before = budget;
+        db.ProbeFile(new WordlistDatabase.LiveFile(new byte[] { 1, 2 }, new byte[] { 1, 2, 3 }, 1_000_000), 10, cuts, ref budget, default);
+        Assert.Equal(before, budget);
+    }
+
+    [Fact]
     public void Planning_RespectsTileCap_AndProbeBudget()
     {
         int savedTiles = WordlistDatabase.MaxPlanTiles, savedProbe = WordlistDatabase.MaxPlanProbeRanges;

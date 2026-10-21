@@ -93,7 +93,7 @@ public sealed partial class WordlistDatabase
     /// <summary>Approximate-size ranges the last PlanCuts spent (test/diagnostic).</summary>
     internal int LastPlanProbeRanges;
 
-    private readonly record struct LiveFile(byte[] Smallest, byte[] Largest, long Size);
+    internal readonly record struct LiveFile(byte[] Smallest, byte[] Largest, long Size);
 
     // Binary-safe key bounds straight from the native live-file list (the managed GetLiveFilesMetadata wrapper turns
     // keys into strings, which would mangle the NUL bytes of the length prefix).
@@ -238,7 +238,7 @@ public sealed partial class WordlistDatabase
         return distinct;
     }
 
-    private void ProbeFile(LiveFile f, long target, List<byte[]> cuts, ref int budget, CancellationToken ct)
+    internal void ProbeFile(LiveFile f, long target, List<byte[]> cuts, ref int budget, CancellationToken ct)
     {
         if (f.Smallest.Length < 4 || f.Largest.Length < 4) return;
         uint lo = BinaryPrimitives.ReadUInt32BigEndian(f.Smallest), hi = BinaryPrimitives.ReadUInt32BigEndian(f.Largest);
@@ -246,7 +246,7 @@ public sealed partial class WordlistDatabase
 
         // Level 1: sizes of [smallest, prefix(L)) for each length boundary L in (lo, hi], plus the whole file.
         var ranges = new List<(byte[] start, byte[] limit)>();
-        for (uint l = lo + 1; l <= hi; l++) { var p = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(p, l); ranges.Add((f.Smallest, p)); }
+        for (ulong l = (ulong)lo + 1; l <= hi; l++) { var p = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(p, (uint)l); ranges.Add((f.Smallest, p)); }
         var whole = new byte[f.Largest.Length + 1]; f.Largest.CopyTo(whole, 0);
         ranges.Add((f.Smallest, whole));
         budget -= ranges.Count;

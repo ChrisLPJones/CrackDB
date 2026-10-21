@@ -42,7 +42,7 @@ public class MemoryCompactionSafetyTests
     public void Gate_Above16L0Files_UsesSinglePath_ResultsEqualReference()
     {
         using var t = new TempDb();
-        ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files + 4);
+        ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files * 2);   // margin: a background compaction can merge some L0 files
         using var db = t.Open(new ScanLimiter(4));
         Assert.True(db.NumFilesAtLevel0() > WordlistDatabase.ParallelMaxL0Files);
         int tiles = 0;
@@ -78,7 +78,7 @@ public class MemoryCompactionSafetyTests
     public void Gate_AfterCompact_GoesParallelAgain_ResultsEqualReference()
     {
         using var t = new TempDb();
-        ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files + 4);
+        ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files * 2);   // margin: a background compaction can merge some L0 files
         using var db = t.Open(new ScanLimiter(4));
         db.Compact();
         Assert.True(db.NumFilesAtLevel0() <= WordlistDatabase.ParallelMaxL0Files);
