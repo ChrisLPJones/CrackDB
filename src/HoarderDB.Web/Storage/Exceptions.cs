@@ -35,3 +35,6 @@ public sealed class ImportHistoryCapExceededException(string message) : Exceptio
 
 /// <summary>The length-breakdown sidecar could not be written (job fails with a fixed message; the previous result stays).</summary>
 public sealed class BreakdownSaveException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>A length-breakdown scan was refused because the db has too many uncompacted L0 files (job fails with a fixed message).</summary>
+public sealed class BreakdownNeedsCompactionException(string message) : Exception(message);

@@ -1,3 +1,4 @@
+using HoarderDB;
 using HoarderDB.Web.Storage;
 
 namespace HoarderDB.Web.Jobs;
@@ -32,6 +33,10 @@ public static class BreakdownRunner
         var lengths = new List<LengthCount>();
         using (var lease = dbs.AcquireRead(job.DbName))      // DbBusyException => job fails "Database is busy."
         {
+            // Memory guard: the scan holds an iterator over every L0 file (multi-GB with many files, for hours).
+            // Fails closed if the count is unreadable. Nothing has been scanned or saved, so any previous result stays.
+            if (lease.Db.NumFilesAtLevel0ForGate() > MemoryDiagnostics.L0WarnFiles)
+                throw new BreakdownNeedsCompactionException("Too many uncompacted L0 files.");
             hook.OnProgress(job.DbName, 0);
             foreach (var (length, count) in lease.Db.LengthDistribution(ct, n =>
                      {

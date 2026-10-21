@@ -476,3 +476,64 @@ public class LengthBreakdownApiTests
         Assert.Equal(new Dictionary<int, long> { [2] = 2, [3] = 1, [7] = 1 }, b);
     }
 }
+
+/// <summary>Memory guard: a breakdown refuses to scan a db with more than 64 uncompacted L0 files.</summary>
+public class BreakdownL0GuardTests
+{
+    private sealed class RecordingStore : ILengthBreakdownStore
+    {
+        public int Saves;
+        public LengthBreakdown? Load(string db) => null;
+        public void Save(string db, DateTimeOffset asOf, IReadOnlyList<LengthCount> lengths) => Saves++;
+    }
+
+    private static async Task<(RecordingStore store, Exception? ex)> RunWithL0(string l0)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
+        HoarderDbWebFactory.EnsureThrowaway(root);
+        Directory.CreateDirectory(root);
+        try
+        {
+            var mgr = new DbManager(new DataRootResolver(root));
+            await mgr.CreateAsync("Test_guard", CancellationToken.None);
+            await mgr.WithWriteAsync("Test_guard", DbOpenMode.Bulk, (db, _) =>
+            { db.Import(new[] { "abc", "defg" }, null, null, threads: 1); return Task.FromResult(0); }, CancellationToken.None);
+            using (var lease = mgr.AcquireRead("Test_guard")) lease.Db.L0PropertyHook = () => l0;
+            var store = new RecordingStore();
+            var job = new Job(JobKind.Breakdown, "Test_guard", null);
+            Exception? ex = null;
+            try { await BreakdownRunner.RunAsync(job, mgr, store, new NoopBreakdownProgressHook(), CancellationToken.None); }
+            catch (Exception e) { ex = e; }
+            await mgr.StopAsync(CancellationToken.None);
+            return (store, ex);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData("65")]
+    [InlineData("garbage")]   // unreadable count fails closed
+    public async Task AboveThreshold_Fails_AndSavesNothing(string l0)
+    {
+        var (store, ex) = await RunWithL0(l0);
+        Assert.IsType<BreakdownNeedsCompactionException>(ex);
+        Assert.Equal(0, store.Saves);
+    }
+
+    [Theory]
+    [InlineData("64")]
+    [InlineData("0")]
+    public async Task AtOrBelowThreshold_RunsAndSaves(string l0)
+    {
+        var (store, ex) = await RunWithL0(l0);
+        Assert.Null(ex);
+        Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
+    public void JobQueue_MapsGuardToFixedMessage()
+    {
+        var src = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "../../../../../src/HoarderDB.Web/Jobs/JobQueue.cs"));
+        Assert.Contains("BreakdownNeedsCompactionException => \"Compact the database first.\"", src);
+    }
+}

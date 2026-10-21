@@ -125,6 +125,7 @@ public sealed class JobQueue(
             {
                 DbBusyException => "Database is busy.",
                 DbNotFoundException => "Database not found.",
+                BreakdownNeedsCompactionException => "Compact the database first.",
                 BreakdownSaveException => "Could not save the length breakdown.",
                 SourceChangedException => "The source file changed while it was being read.",
                 IOException => "I/O error while reading the source or writing the database.",
