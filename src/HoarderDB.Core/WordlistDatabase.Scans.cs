@@ -22,6 +22,15 @@ public sealed partial class WordlistDatabase
     /// <summary>Test seam: called by a scan worker at the start of every tile (null in production).</summary>
     internal Action<Tile>? TileHook;
 
+    /// <summary>
+    /// Parallel scans open one iterator per tile and each holds the index block of every L0 file (fill_cache off),
+    /// so index memory grows with tiles x L0 files (measured 3x for 3 tiles). Above this many L0 files scans stay
+    /// single-threaded; results are identical, a compaction restores the speed-up.
+    /// </summary>
+    internal const int ParallelMaxL0Files = 16;
+
+    private bool ParallelAllowedByL0() => NumFilesAtLevel0ForGate() <= ParallelMaxL0Files;
+
     /// <summary>Scan threads this handle's process-wide limiter allows (diagnostic).</summary>
     public int ScanThreads => _scanLimiter.Cap;
 
@@ -278,7 +287,7 @@ public sealed partial class WordlistDatabase
         int t = EffectiveThreads(threads);
         var upper = UpperBoundFor(max);
         bool bounded = lo >= 0 && (max == null || upper != null || max == int.MaxValue);
-        if (t > 1 && bounded && EstimatedCount() >= (minKeys ?? ParallelMinKeys))
+        if (t > 1 && bounded && EstimatedCount() >= (minKeys ?? ParallelMinKeys) && ParallelAllowedByL0())
             return CountRangeParallel(LengthPrefix(lo), upper, t, splitBytesOverride, ct);
         return CountRangeSingle(min, max);
     }
@@ -360,7 +369,7 @@ public sealed partial class WordlistDatabase
         CancellationToken ct, Action<long>? progress)
     {
         int t = EffectiveThreads(threads);
-        if (t > 1 && EstimatedCount() >= (minKeys ?? ParallelMinKeys))
+        if (t > 1 && EstimatedCount() >= (minKeys ?? ParallelMinKeys) && ParallelAllowedByL0())
         {
             ct.ThrowIfCancellationRequested();
             return LengthDistributionParallel(t, splitBytesOverride, ct, progress);
