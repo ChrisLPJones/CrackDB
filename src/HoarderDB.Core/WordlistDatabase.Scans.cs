@@ -29,7 +29,7 @@ public sealed partial class WordlistDatabase
     /// </summary>
     internal const int ParallelMaxL0Files = 16;
 
-    private bool ParallelAllowedByL0() => NumFilesAtLevel0() <= ParallelMaxL0Files;
+    private bool ParallelAllowedByL0() => NumFilesAtLevel0ForGate() <= ParallelMaxL0Files;
 
     /// <summary>Scan threads this handle's process-wide limiter allows (diagnostic).</summary>
     public int ScanThreads => _scanLimiter.Cap;

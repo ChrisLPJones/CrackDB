@@ -50,18 +50,17 @@ public sealed partial class WordlistDatabase : IDisposable
     /// </param>
     /// <param name="enableAutoCompaction">
     /// Only meaningful for a non-bulk open (a bulk-load open already disables auto-compactions
-    /// unconditionally, for import speed). True (the default) matches a genuine standalone
-    /// read/compact open: RocksDB may auto-compact once enough L0 files accumulate. Pass false for
-    /// a handle that only serves reads between queued jobs, so a brief reopen between two imports
-    /// doesn't silently re-arm a background compaction against the whole on-disk dataset -
-    /// compaction then only happens via an explicit <see cref="Compact"/> call. This never affects
-    /// read correctness: data is still flushed and visible; only the auto-compaction *trigger* is
-    /// suppressed.
+    /// unconditionally, for import speed). True (the library default, used by the CLI and tests) lets
+    /// RocksDB auto-compact once enough L0 files accumulate. The web app's DbManager always passes false
+    /// (read opens and job opens alike): an auto-compaction is invisible, uncancellable and holds the index
+    /// of every L0 file in memory, so compaction there only happens via an explicit <see cref="Compact"/>
+    /// call (manual CompactRange does not need the auto trigger). This never affects read correctness: data
+    /// is still flushed and visible; only the auto-compaction *trigger* is suppressed.
     /// </param>
     /// <param name="scanLimiter">
     /// Process-wide scan-thread budget (<c>Storage:ScanThreads</c>): caps the worker threads of parallel
-    /// scans (<see cref="LengthDistribution"/>, <see cref="CountRange"/>) and sets RocksDB's
-    /// <c>max_subcompactions</c> no longer follows it. Null = <see cref="ScanLimiter.Default"/> (cores - 1).
+    /// scans (<see cref="LengthDistribution"/>, <see cref="CountRange"/>). It does not affect compaction
+    /// (see <paramref name="maxSubcompactions"/>). Null = <see cref="ScanLimiter.Default"/> (cores - 1).
     /// </param>
     /// <param name="maxSubcompactions">
     /// RocksDB <c>max_subcompactions</c> on non-bulk opens (<c>Storage:MaxSubcompactions</c>). Default 1: each extra
@@ -179,6 +178,14 @@ public sealed partial class WordlistDatabase : IDisposable
 
     /// <summary>Raw <c>rocksdb.aggregated-table-properties</c> text (diagnostics; parse with <see cref="MemoryDiagnostics"/>), or null.</summary>
     public string? AggregatedTableProperties() => _db.GetProperty("rocksdb.aggregated-table-properties");
+
+    /// <summary>L0 count for the parallel-scan gate: long.MaxValue (unknown, so single-thread) if the property is unreadable.</summary>
+    internal long NumFilesAtLevel0ForGate() => ParseL0ForGate(L0PropertyHook != null ? L0PropertyHook() : _db.GetProperty("rocksdb.num-files-at-level0"));
+
+    internal static long ParseL0ForGate(string? s) => long.TryParse(s, out var n) && n >= 0 ? n : long.MaxValue;
+
+    /// <summary>Test seam: replaces the raw L0 property text read by the gate.</summary>
+    internal Func<string?>? L0PropertyHook;
 
     /// <summary>The block cache's configured capacity in bytes, straight from the engine (test/diagnostic hook).</summary>
     public long BlockCacheCapacityBytes()

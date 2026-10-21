@@ -10,7 +10,8 @@ public interface IStorageDiagnostics
 {
     void LogStartup(int scanThreads, int maxSubcompactions);
     /// <param name="phase">Fixed label: "open", "job-start" or "job-finish".</param>
-    void LogHandle(string phase, WordlistDatabase db, int scanThreads);
+    /// <param name="includeIndex">Walks every SST file's table properties (slow on a huge cold db): false on the open path, which runs under the entry lock.</param>
+    void LogHandle(string phase, WordlistDatabase db, int scanThreads, bool includeIndex = true);
 }
 
 public sealed class StorageDiagnostics : IStorageDiagnostics
@@ -50,14 +51,14 @@ public sealed class StorageDiagnostics : IStorageDiagnostics
         catch (Exception) { /* diagnostics must never throw */ }
     }
 
-    public void LogHandle(string phase, WordlistDatabase db, int scanThreads)
+    public void LogHandle(string phase, WordlistDatabase db, int scanThreads, bool includeIndex = true)
     {
         try
         {
             var mem = MemoryDiagnostics.ReadProcessMemory(_reader);
             long l0 = db.NumFilesAtLevel0();
             long sst = db.TotalSstFilesBytes();
-            long? index = MemoryDiagnostics.ParseIndexBytes(db.AggregatedTableProperties());
+            long? index = includeIndex ? MemoryDiagnostics.ParseIndexBytes(db.AggregatedTableProperties()) : null;
             _logger?.LogInformation(
                 "Storage {Phase}: RssAnon {RssAnonMb} MB, VmHWM {HwmMb} MB, GC committed {GcMb} MB, L0 files {L0}, SST size {SstMb} MB, index {IndexMb} MB",
                 phase, Mb(mem.RssAnonBytes), Mb(mem.VmHwmBytes), Mb(mem.GcCommittedBytes), l0, Mb(sst < 0 ? null : sst), Mb(index));

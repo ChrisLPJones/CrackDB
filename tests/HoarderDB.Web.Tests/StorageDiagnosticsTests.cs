@@ -124,6 +124,29 @@ public class StorageDiagnosticsTests
     }
 
     [Fact]
+    public async Task FreshManager_OverExistingMultiL0Db_ReadAcquire_KeepsL0Unchanged()
+    {
+        var root = NewRoot();
+        try
+        {
+            var dbDir = Path.Combine(root, "Test_multi");
+            using (var seed = new WordlistDatabase(dbDir, new System.Text.UTF8Encoding(false), bulkLoad: true)) { }
+            for (int r = 0; r < 8; r++)
+                using (var seed = new WordlistDatabase(dbDir, new System.Text.UTF8Encoding(false), bulkLoad: true))
+                    seed.Import(Enumerable.Range(r * 50, 50).Select(x => "pw" + x), null, null, threads: 1);
+            var mgr = new DbManager(new DataRootResolver(root));
+            long before, after;
+            using (var lease = mgr.AcquireRead("Test_multi")) before = lease.Db.NumFilesAtLevel0();
+            Assert.True(before >= 8, $"L0 {before}");
+            await Task.Delay(500);
+            using (var lease = mgr.AcquireRead("Test_multi")) after = lease.Db.NumFilesAtLevel0();
+            Assert.Equal(before, after);
+            await mgr.StopAsync(CancellationToken.None);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task WebPath_FreshInstall_ImportsKeepL0_CompactJobShrinks_ReadsCorrect()
     {
         var root = NewRoot();

@@ -54,6 +54,26 @@ public class MemoryCompactionSafetyTests
         Assert.Equal(db.CountRangeReference(null, null), count);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("abc")]
+    [InlineData("-1")]
+    public void Gate_UnreadableL0Property_IsUnknown_AndFallsBackToSinglePath(string? raw)
+    {
+        Assert.Equal(long.MaxValue, WordlistDatabase.ParseL0ForGate(raw));
+        Assert.Equal(5, WordlistDatabase.ParseL0ForGate("5"));
+        using var t = new TempDb();
+        ImportRounds(t.Path, 3);
+        using var db = t.Open(new ScanLimiter(4));
+        db.L0PropertyHook = () => raw;
+        int tiles = 0;
+        db.TileHook = _ => Interlocked.Increment(ref tiles);
+        var dist = db.LengthDistributionCore(threads: 4, minKeys: 1, splitBytesOverride: null, default, null).ToArray();
+        Assert.Equal(0, tiles);
+        Assert.Equal(db.LengthDistributionReference().ToArray(), dist);
+    }
+
     [Fact]
     public void Gate_AfterCompact_GoesParallelAgain_ResultsEqualReference()
     {

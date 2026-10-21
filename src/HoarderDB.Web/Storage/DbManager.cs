@@ -259,7 +259,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction, scanLimiter: _scanLimiter,
             maxSubcompactions: _maxSubcompactions);
         entry.Mode = mode;
-        _diag.LogHandle("open", db, _scanLimiter.Cap);
+        _diag.LogHandle("open", db, _scanLimiter.Cap, includeIndex: false);   // runs under entry.Gate: cheap properties only
         return db;
     }
 
