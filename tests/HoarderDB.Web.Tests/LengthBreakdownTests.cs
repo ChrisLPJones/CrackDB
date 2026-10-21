@@ -356,6 +356,65 @@ public class LengthBreakdownApiTests
         Assert.Equal(before, after);
     }
 
+    // Forces the parallel scan path on the 9-word fixture (normally it needs >= 1M keys) with ScanThreads = 3.
+    private static HoarderDbWebFactory ParallelFactory(BreakdownHook? bh = null) =>
+        new(1000, new Dictionary<string, string?> { ["Storage:ScanThreads"] = "3" }, null, null, null, null, null)
+        { ExtraServices = bh is null ? null : s => s.AddSingleton<IBreakdownProgressHook>(bh) };
+
+    [Fact]
+    public async Task ParallelPath_ReturnsSameCounts_StatsAndCountEndpoints()
+    {
+        var saved = WordlistDatabase.ParallelMinKeys;
+        WordlistDatabase.ParallelMinKeys = 0;
+        try
+        {
+            using var f = ParallelFactory();
+            var c = await f.NewLoggedInClientAsync();
+            var dbs = f.Services.GetRequiredService<IDbManager>();
+            using (var lease = dbs.AcquireRead(Db)) Assert.Equal(3, lease.Db.ScanThreads);
+
+            var job = await WaitStatus(c, await Post(c, Db), "completed", "failed", "cancelled");
+            Assert.Equal("completed", job.GetProperty("status").GetString());
+            Assert.Equal(Expected(), Lengths(await Body(await c.GetAsync($"/api/dbs/{Db}/length-breakdown"))));
+
+            var stats = await Body(await c.GetAsync($"/api/dbs/{Db}/stats?full=true"));
+            Assert.Equal(Expected(), Lengths(stats));
+            var cnt = await Body(await c.GetAsync($"/api/dbs/{Db}/count?min=3&max=4"));
+            Assert.Equal(HoarderDbWebFactory.Words.Count(w => w.Length is >= 3 and <= 4), cnt.GetProperty("count").GetInt64());
+        }
+        finally { WordlistDatabase.ParallelMinKeys = saved; }
+    }
+
+    [Fact]
+    public async Task ParallelPath_Cancel_KeepsPreviousResult_AndReleasesTheLease()
+    {
+        var saved = WordlistDatabase.ParallelMinKeys;
+        WordlistDatabase.ParallelMinKeys = 0;
+        var bh = new BreakdownHook();
+        try
+        {
+            using var f = ParallelFactory(bh);
+            var c = await f.NewLoggedInClientAsync();
+            await WaitStatus(c, await Post(c, Db), "completed");
+            var before = (await Body(await c.GetAsync($"/api/dbs/{Db}/length-breakdown"))).GetProperty("asOf").GetDateTimeOffset();
+            await Task.Delay(20);
+
+            bh.Arm();
+            var id = await Post(c, Db);
+            Assert.True(bh.Reached.Wait(TimeSpan.FromSeconds(30)));      // running, lease held, scan not started yet
+            await c.PostAsync($"/api/jobs/{id}/cancel", null);
+            bh.Release.Set();
+            Assert.Equal("cancelled", (await WaitStatus(c, id, "cancelled", "completed", "failed")).GetProperty("status").GetString());
+            bh.Disarm();
+
+            var after = (await Body(await c.GetAsync($"/api/dbs/{Db}/length-breakdown"))).GetProperty("asOf").GetDateTimeOffset();
+            Assert.Equal(before, after);
+            // Lease released: the db is readable and writable-window capable again (a new scan completes).
+            Assert.Equal("completed", (await WaitStatus(c, await Post(c, Db), "completed", "failed", "cancelled")).GetProperty("status").GetString());
+        }
+        finally { bh.Disarm(); WordlistDatabase.ParallelMinKeys = saved; }
+    }
+
     [Fact]
     public async Task FailedScan_KeepsPreviousResult_WithFixedMessage()
     {

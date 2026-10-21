@@ -18,11 +18,12 @@ namespace HoarderDB;
 ///   * length X..Y          -> one contiguous range scan
 /// Deduplication is free: identical passwords produce identical keys and collapse.
 /// </summary>
-public sealed class WordlistDatabase : IDisposable
+public sealed partial class WordlistDatabase : IDisposable
 {
     private readonly RocksDb _db;
     private readonly Encoding _enc;
     private readonly MemoryPlan _plan;
+    private readonly ScanLimiter _scanLimiter;
 
     /// <summary>The memory plan this handle was opened with (write buffers, import pipeline sizes).</summary>
     public MemoryPlan Plan => _plan;
@@ -54,10 +55,16 @@ public sealed class WordlistDatabase : IDisposable
     /// read correctness: data is still flushed and visible; only the auto-compaction *trigger* is
     /// suppressed.
     /// </param>
+    /// <param name="scanLimiter">
+    /// Process-wide scan-thread budget (<c>Storage:ScanThreads</c>): caps the worker threads of parallel
+    /// scans (<see cref="LengthDistribution"/>, <see cref="CountRange"/>) and sets RocksDB's
+    /// <c>max_subcompactions</c> on non-bulk opens. Null = <see cref="ScanLimiter.Default"/> (cores - 1).
+    /// </param>
     public WordlistDatabase(string path, Encoding encoding, bool bulkLoad = false, long? memoryBudgetBytes = null,
-        bool enableAutoCompaction = true)
+        bool enableAutoCompaction = true, ScanLimiter? scanLimiter = null)
     {
         _enc = encoding;
+        _scanLimiter = scanLimiter ?? ScanLimiter.Default;
 
         // Tuned for write throughput on huge imports. Disk size is not a concern,
         // so buffers are large, compression is off (saves CPU), and compaction
@@ -111,6 +118,9 @@ public sealed class WordlistDatabase : IDisposable
             options.SetAllowConcurrentMemtableWrite(true)
                    .SetLevel0FileNumCompactionTrigger(4);
             if (!enableAutoCompaction) options.SetDisableAutoCompactions(1);
+            // Lets one manual/auto compaction split its key range across several threads (the default
+            // is 1 = one core). Not for bulk opens: an import never compacts. RocksDbSharp has no managed setter.
+            Native.Instance.rocksdb_options_set_max_subcompactions(options.Handle, (uint)_scanLimiter.Cap);
         }
 
         _db = RocksDb.Open(options, path);
@@ -249,6 +259,48 @@ public sealed class WordlistDatabase : IDisposable
     public void Compact() => _db.CompactRange((byte[]?)null, (byte[]?)null, (ColumnFamilyHandle?)null);
 
     /// <summary>
+    /// Read options for one scan: fill_cache off (a full scan must not evict the shared 256 MB block cache
+    /// that also holds index/filter blocks), optional readahead, optional exclusive upper key bound and an
+    /// optional snapshot. The bound lives in unmanaged memory because the C API keeps a pointer to the
+    /// caller's bytes (not a copy): it must outlive the iterator, so dispose this AFTER the iterator
+    /// (declare it first in a using chain).
+    /// </summary>
+    internal sealed class ScanReadOptions : IDisposable
+    {
+        public ReadOptions Options { get; } = new ReadOptions();
+        private IntPtr _bound;
+
+        public ScanReadOptions(ulong readahead, byte[]? upperBound = null, Snapshot? snapshot = null)
+        {
+            Options.SetFillCache(false);
+            if (readahead > 0) Options.SetReadaheadSize(readahead);
+            if (snapshot != null) Options.SetSnapshot(snapshot);
+            if (upperBound != null)
+            {
+                _bound = System.Runtime.InteropServices.Marshal.AllocHGlobal(Math.Max(1, upperBound.Length));
+                System.Runtime.InteropServices.Marshal.Copy(upperBound, 0, _bound, upperBound.Length);
+                Native.Instance.rocksdb_readoptions_set_iterate_upper_bound(Options.Handle, _bound, (UIntPtr)upperBound.Length);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_bound != IntPtr.Zero) { System.Runtime.InteropServices.Marshal.FreeHGlobal(_bound); _bound = IntPtr.Zero; }
+        }
+    }
+
+    /// <summary>Readahead for bulk scans (counts, breakdown); measured in agent-reports/multicore-scans/benchmark.md.</summary>
+    internal static ulong BulkReadaheadBytes = 0;
+
+    // Key prefix just past every key of length <= max, or null when no such bound exists (max is open or int.MaxValue).
+    private static byte[]? UpperBoundFor(int? max) =>
+        max is >= 0 and < int.MaxValue ? LengthPrefix(max.Value + 1) : null;
+
+    // Length / word of the iterator's current key straight from the native buffer (no per-key byte[]).
+    private static int CurrentLength(Iterator it) => BinaryPrimitives.ReadInt32BigEndian(it.GetKeySpan());
+    private string CurrentWord(Iterator it) => _enc.GetString(it.GetKeySpan().Slice(4));
+
+    /// <summary>
     /// Stream every stored password whose length is in [min, max]. Either bound may
     /// be null (open-ended). Results come out ordered by length, then by password.
     /// An optional limit caps how many are returned.
@@ -258,15 +310,14 @@ public sealed class WordlistDatabase : IDisposable
         int lo = min ?? 0;
         long produced = 0;
 
-        var readOpts = new ReadOptions();
-        using var it = _db.NewIterator(readOptions: readOpts);
+        using var ro = new ScanReadOptions(0, UpperBoundFor(max));
+        using var it = _db.NewIterator(readOptions: ro.Options);
         for (it.Seek(LengthPrefix(lo)); it.Valid(); it.Next())
         {
-            var key = it.Key();
-            int len = BinaryPrimitives.ReadInt32BigEndian(key);
+            int len = CurrentLength(it);
             if (max.HasValue && len > max.Value) yield break;   // sorted: nothing longer follows in-range
 
-            yield return _enc.GetString(key, 4, key.Length - 4);
+            yield return CurrentWord(it);
             if (limit.HasValue && ++produced >= limit.Value) yield break;
         }
     }
@@ -283,8 +334,8 @@ public sealed class WordlistDatabase : IDisposable
     public IEnumerable<string> Scan(int? min, int? max, string? resumeAfterWord)
     {
         int lo = min ?? 0;
-        var readOpts = new ReadOptions();
-        using var it = _db.NewIterator(readOptions: readOpts);
+        using var ro = new ScanReadOptions(0, UpperBoundFor(max));
+        using var it = _db.NewIterator(readOptions: ro.Options);
         if (resumeAfterWord != null)
         {
             // Resume strictly after the given word: seek to its key, then step once past it (or past
@@ -299,64 +350,15 @@ public sealed class WordlistDatabase : IDisposable
         }
         for (; it.Valid(); it.Next())
         {
-            var key = it.Key();
-            int len = BinaryPrimitives.ReadInt32BigEndian(key);
+            int len = CurrentLength(it);
             if (len < lo) continue;                              // only reachable via a resume seek landing short
             if (max.HasValue && len > max.Value) yield break;    // sorted: nothing longer follows in-range
-            yield return _enc.GetString(key, 4, key.Length - 4);
+            yield return CurrentWord(it);
         }
-    }
-
-    /// <summary>Exact count of passwords with length in [min, max] (full range scan).</summary>
-    public long CountRange(int? min, int? max)
-    {
-        int lo = min ?? 0;
-        long count = 0;
-        using var it = _db.NewIterator();
-        for (it.Seek(LengthPrefix(lo)); it.Valid(); it.Next())
-        {
-            int len = BinaryPrimitives.ReadInt32BigEndian(it.Key());
-            if (max.HasValue && len > max.Value) break;
-            count++;
-        }
-        return count;
     }
 
     /// <summary>Keys between cancellation checks / progress callbacks in <see cref="LengthDistribution"/>.</summary>
     public const int ScanCheckInterval = 65_536;
-
-    /// <summary>
-    /// Exact (length, count) pairs, ordered by length (full scan). The scan checks <paramref name="ct"/> and
-    /// reports the number of keys read to <paramref name="progress"/> every <see cref="ScanCheckInterval"/> keys
-    /// (a cancelled token throws <see cref="OperationCanceledException"/>), so a multi-hour scan can be stopped.
-    /// </summary>
-    public IEnumerable<(int length, long count)> LengthDistribution(CancellationToken ct = default, Action<long>? progress = null)
-    {
-        ct.ThrowIfCancellationRequested();
-        using var it = _db.NewIterator();
-        it.SeekToFirst();
-        int current = -1;
-        long count = 0, scanned = 0;
-        while (it.Valid())
-        {
-            int len = BinaryPrimitives.ReadInt32BigEndian(it.Key());
-            if (len != current)
-            {
-                if (current >= 0) yield return (current, count);
-                current = len;
-                count = 0;
-            }
-            count++;
-            if (++scanned % ScanCheckInterval == 0)
-            {
-                ct.ThrowIfCancellationRequested();
-                progress?.Invoke(scanned);
-            }
-            it.Next();
-        }
-        progress?.Invoke(scanned);
-        if (current >= 0) yield return (current, count);
-    }
 
     public void Dispose() => _db.Dispose();
 }

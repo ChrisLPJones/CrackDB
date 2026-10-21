@@ -5,7 +5,7 @@ namespace HoarderDB.Web.Options;
 /// <summary>
 /// Where databases and the Data Protection key ring live. Deliberately has no defaults: a
 /// forgotten setting must stop startup rather than fall back to a real data path.
-/// Env: CRACKDB_Storage__DataRoot/HOARDERDB_Storage__DataRoot, CRACKDB_Storage__KeyPath/HOARDERDB_Storage__KeyPath, CRACKDB_Storage__IncomingRoot/HOARDERDB_Storage__IncomingRoot, CRACKDB_Storage__ImportMemoryMb/HOARDERDB_Storage__ImportMemoryMb (HOARDERDB_ wins if both are set).
+/// Env: CRACKDB_Storage__DataRoot/HOARDERDB_Storage__DataRoot, CRACKDB_Storage__KeyPath/HOARDERDB_Storage__KeyPath, CRACKDB_Storage__IncomingRoot/HOARDERDB_Storage__IncomingRoot, CRACKDB_Storage__ImportMemoryMb/HOARDERDB_Storage__ImportMemoryMb, CRACKDB_Storage__ScanThreads/HOARDERDB_Storage__ScanThreads (HOARDERDB_ wins if both are set).
 /// </summary>
 public sealed class StorageOptions
 {
@@ -25,6 +25,14 @@ public sealed class StorageOptions
     /// 0 or unset = auto (half of the memory available to the process); otherwise at least 256.
     /// </summary>
     public long ImportMemoryMb { get; set; }
+
+    /// <summary>
+    /// Most threads all parallel database scans (length breakdown, exact count, stats) may use together, and
+    /// RocksDB's <c>max_subcompactions</c>. 0 or unset = auto (processors - 1, at least 1, so one core is left
+    /// for the web server); otherwise 1..<see cref="HoarderDB.ScanLimiter.MaxCap"/>. 1 = single-threaded scans.
+    /// Operator config only.
+    /// </summary>
+    public int ScanThreads { get; set; }
 }
 
 /// <summary>Browser-upload limits. Env: CRACKDB_Upload__MaxBytes/HOARDERDB_Upload__MaxBytes (0 or unset = unlimited; HOARDERDB_ wins if both are set).</summary>
@@ -56,6 +64,8 @@ public sealed class StorageOptionsValidator : IValidateOptions<StorageOptions>
             errors.Add("Storage:IncomingRoot does not exist or is not a directory.");
         if (o.ImportMemoryMb < 0 || (o.ImportMemoryMb > 0 && o.ImportMemoryMb < 256))
             errors.Add("Storage:ImportMemoryMb must be 0 (auto) or at least 256.");
+        if (o.ScanThreads < 0 || o.ScanThreads > HoarderDB.ScanLimiter.MaxCap)
+            errors.Add($"Storage:ScanThreads must be 0 (auto) or 1..{HoarderDB.ScanLimiter.MaxCap}.");
         return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
     }
 }

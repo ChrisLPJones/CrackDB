@@ -84,6 +84,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     private readonly ConcurrentDictionary<string, DbEntry> _entries = new(StringComparer.Ordinal);
     private readonly int _maxDatabases;
     private readonly long? _memoryBudgetBytes;
+    private readonly ScanLimiter _scanLimiter;
     private readonly ILogger? _logger;
     private bool _closed;
 
@@ -98,6 +99,8 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         _logger = logger;
         long mb = storage?.Value.ImportMemoryMb ?? 0;
         _memoryBudgetBytes = mb > 0 ? mb * 1024 * 1024 : null;   // null = engine auto default
+        int st = storage?.Value.ScanThreads ?? 0;
+        _scanLimiter = new ScanLimiter(st > 0 ? st : ScanLimiter.AutoThreads(Environment.ProcessorCount));   // shared by every handle: one process-wide scan-thread cap
     }
 
     public Task CreateAsync(string name, CancellationToken ct) =>
@@ -246,7 +249,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         // open (first open and every write-window reopen), never fatal - see ImportHistory.MigrateLegacySidecar.
         ImportHistory.MigrateLegacySidecar(path, _logger);
         var db = new WordlistDatabase(path, Utf8, bulkLoad: mode == DbOpenMode.Bulk,
-            memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction);
+            memoryBudgetBytes: _memoryBudgetBytes, enableAutoCompaction: enableAutoCompaction, scanLimiter: _scanLimiter);
         entry.Mode = mode;
         return db;
     }
@@ -260,9 +263,9 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         var budget = _memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes();
         var p = MemoryPlan.Compute(budget, Environment.ProcessorCount);
         _logger?.LogInformation(
-            "Import memory budget {BudgetMb} MB ({Source}): {Buffers} x {BufferMb} MB write buffers, {Workers} workers, queue {Queue}",
+            "Import memory budget {BudgetMb} MB ({Source}): {Buffers} x {BufferMb} MB write buffers, {Workers} workers, queue {Queue}; scan threads {ScanThreads}",
             budget / (1024 * 1024), _memoryBudgetBytes is null ? "auto" : "configured",
-            p.MaxBuffers, p.WriteBuffer / (1024 * 1024), p.Workers, p.QueueCapacity);
+            p.MaxBuffers, p.WriteBuffer / (1024 * 1024), p.Workers, p.QueueCapacity, _scanLimiter.Cap);
         return Task.CompletedTask;
     }
     public Task StopAsync(CancellationToken cancellationToken) { CloseAll(); return Task.CompletedTask; }
