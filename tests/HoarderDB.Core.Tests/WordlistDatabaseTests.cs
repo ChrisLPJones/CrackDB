@@ -29,6 +29,9 @@ public sealed class TempDb : IDisposable
 
     public WordlistDatabase Open() => new(Path, new UTF8Encoding(false));
 
+    public WordlistDatabase Open(ScanLimiter limiter, Encoding? enc = null, bool bulk = false) =>
+        new(Path, enc ?? new UTF8Encoding(false), bulkLoad: bulk, scanLimiter: limiter);
+
     public void Dispose()
     {
         EnsureThrowaway(Path);
