@@ -145,7 +145,7 @@ internal sealed class OrderedTileBuffers
     {
         lock (_gate)
         {
-            int before = dest.Count;
+            int before = dest.Count, headBefore = _head;
             long chars = 0;
             while (_head < _tiles.Length)
             {
@@ -162,7 +162,7 @@ internal sealed class OrderedTileBuffers
                 if (dest.Count - before >= _capMatches || chars >= _capChars) break;
             }
             int moved = dest.Count - before;
-            if (moved > 0 || _head >= _tiles.Length) Monitor.PulseAll(_gate);
+            if (moved > 0 || _head != headBefore) Monitor.PulseAll(_gate);   // an empty Done tile also opens the window
             return moved;
         }
     }

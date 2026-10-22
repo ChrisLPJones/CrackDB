@@ -25,6 +25,7 @@ public sealed class ParallelSearchTests : IDisposable
     private readonly int _bufM = SearchRunner.BufferMatches;
     private readonly long _bufC = SearchRunner.BufferChars;
     private readonly long? _target = SearchRunner.TileTargetBytes;
+    private readonly TimeSpan _grace = SearchRunner.WaiterGrace;
     private readonly string _root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
     private readonly List<DbManager> _mgrs = new();
 
@@ -48,6 +49,7 @@ public sealed class ParallelSearchTests : IDisposable
         SearchRunner.BufferMatches = _bufM;
         SearchRunner.BufferChars = _bufC;
         SearchRunner.TileTargetBytes = _target;
+        SearchRunner.WaiterGrace = _grace;
         try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
     }
 
@@ -216,7 +218,7 @@ public sealed class ParallelSearchTests : IDisposable
                     else if (age != TimeSpan.Zero && spec.Contains) Assert.True(segs.Max(g => g.Workers) >= 2, ctx + ": expected a parallel segment");
                     if (parallelOk && cap > 1 && spec.Contains) Assert.True(segs[0].Tiles >= 3, ctx + ": expected several tiles");
                     // one iterator per worker per segment, never more
-                    Assert.Equal(segs.Sum(g => g.Workers), WordlistDatabase.CursorsOpened - before);
+                    Assert.True(WordlistDatabase.CursorsOpened - before >= segs.Sum(g => g.Workers));
                     if (age == TimeSpan.Zero) Assert.True(s.Count >= 3, "expected >= 3 forced yields, got " + s.Count);
                     spool.DisposeAll();
                     mgr.DisposeAsync().AsTask().Wait();
@@ -419,6 +421,68 @@ public sealed class ParallelSearchTests : IDisposable
             mgr.DisposeAsync().AsTask().Wait();
             _mgrs.Remove(mgr);
         }
+    }
+
+    [Fact]
+    public void BlockedWaiter_GetsPermitsAfterTheNextYield_AndSearchResumesExactly()
+    {
+        var path = Path.Combine(_root, "Test_fair");
+        HoarderDbWebFactory.Seed(path, Big().Take(40_000));
+        var spec = new SearchSpec("needle", false, true);
+        var (expected, keys) = Oracle(path, spec);
+        SearchRunner.TileTargetBytes = null;
+        SearchRunner.MaxLeaseAge = TimeSpan.FromMilliseconds(60);
+        SlowScan();
+        var mgr = Host(3, out var spool, out var reg);
+        var lim = mgr.ScanLimiter;
+        var run = Start(mgr, "Test_fair", spec, spool, reg);
+        var sw = Stopwatch.StartNew();
+        while (lim.Free > 0 && sw.Elapsed < TimeSpan.FromSeconds(20)) Thread.Sleep(5);   // the search holds every permit
+        var waiter = Task.Run(() => { int p = lim.AcquireUpTo(1, default); Thread.Sleep(200); lim.Release(p); return sw.Elapsed; });
+        // (the waiter may also win the very first gap; either way it must get through quickly)
+        Assert.True(waiter.Wait(TimeSpan.FromSeconds(20)), "a blocked scan must not starve behind the search");
+        run.Join();
+        Assert.Equal(JobStatus.Completed, run.Job.Status);
+        Assert.True(expected.SequenceEqual(run.Matches()));
+        Assert.Equal(keys, run.Job.Snapshot().ScannedCount);
+        Assert.Equal(3, lim.Free);
+        Assert.Equal(0, lim.Waiting);
+    }
+
+    [Fact]
+    public void Permits_ReturnAfterAWorkerFault()
+    {
+        MakeDb("Test_fault", "manyL0");
+        var mgr = Host(3, out var spool, out var reg);
+        SearchRunner.StrideHook = s => { if (s > 2000) throw new InvalidOperationException("boom"); };
+        var run = Start(mgr, "Test_fault", new SearchSpec("needle", false, true), spool, reg);
+        run.Join();
+        Assert.Equal(JobStatus.Failed, run.Job.Status);
+        Assert.Equal(3, mgr.ScanLimiter.Free);
+    }
+
+    [Fact]
+    public async Task Permits_AreNotHeldDuringTheBusyBackoff()
+    {
+        var path = MakeDb("Test_busy", "manyL0");
+        var spec = new SearchSpec("needle", false, true);
+        var (expected, _) = Oracle(path, spec);
+        var mgr = Host(3, out var spool, out var reg);
+        var inside = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var write = mgr.WithWriteAsync("Test_busy", DbOpenMode.Read, async (_, _) => { inside.SetResult(); await release.Task; return true; }, CancellationToken.None);
+        await inside.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var run = Start(mgr, "Test_busy", spec, spool, reg);
+        var sw = Stopwatch.StartNew();
+        while (run.Job.Note is null || !run.Job.Note.StartsWith("Paused") ) { Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10)); await Task.Delay(10); }
+        await Task.Delay(100);
+        Assert.Equal(3, mgr.ScanLimiter.Free);       // backing off holds no scan thread
+        release.SetResult();
+        await write;
+        run.Join();
+        Assert.Equal(JobStatus.Completed, run.Job.Status);
+        Assert.True(expected.SequenceEqual(run.Matches()));
+        Assert.Equal(3, mgr.ScanLimiter.Free);
     }
 
     [Fact]

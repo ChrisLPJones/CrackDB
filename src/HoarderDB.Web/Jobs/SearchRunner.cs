@@ -64,6 +64,9 @@ public static class SearchRunner
     /// <summary>Test knob: tile size target in bytes of live files (null = total / (threads x 8)); small values make many tiles on a small db.</summary>
     internal static long? TileTargetBytes { get; set; }
 
+    /// <summary>Longest a search lets another scan that is blocked on permits go first before it re-takes them (keeps a breakdown/count from starving behind it, and the search from starving behind a stream of waiters).</summary>
+    internal static TimeSpan WaiterGrace { get; set; } = TimeSpan.FromSeconds(60);
+
     /// <summary>Shown while the search waits for a scan thread (a breakdown or another scan holds every permit).</summary>
     public const string WaitingForThreadNote = "Waiting for a free scan thread.";
 
@@ -289,6 +292,14 @@ public static class SearchRunner
         bool noted = false;
         try
         {
+            // Fairness: a scan already blocked on permits goes first (bounded wait), so a queued breakdown/count is not starved by a search that re-takes every permit after each yield.
+            var grace = Stopwatch.StartNew();
+            while (limiter.Waiting > 0 && grace.Elapsed < WaiterGrace)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!noted) { job.Note = WaitingForThreadNote; noted = true; }
+                ct.WaitHandle.WaitOne(100);
+            }
             while (true)
             {
                 ct.ThrowIfCancellationRequested();

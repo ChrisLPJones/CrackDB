@@ -74,6 +74,20 @@ public sealed class OrderedTileBuffersTests
     }
 
     [Fact]
+    public void Drain_OverAnEmptyDoneTile_WakesAWaitingClaim()
+    {
+        var buf = new OrderedTileBuffers(3, 100, 1 << 20);
+        buf.SetWindow(1);
+        Assert.Equal(0, buf.Claim(default, out _));
+        buf.Commit(0, new List<string>(), 0, null, 5, true, default);   // done, no matches
+        var next = Task.Run(() => buf.Claim(default, out _));
+        Thread.Sleep(10);
+        Assert.Equal(0, buf.Drain(new List<string>()));                    // head moves 0 -> 1 with nothing to move
+        Assert.True(next.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, next.Result);
+    }
+
+    [Fact]
     public void CancelledCommit_ChangesNothing_AndTheStrideIsRedoneFromTheOldCursor()
     {
         var buf = new OrderedTileBuffers(2, 2, 1 << 20);
