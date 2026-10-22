@@ -34,6 +34,8 @@ public sealed class AdminPasswordStore(string keyDir)
     public PasswordState Load(string envHash, Func<string, bool> looksLikeHash)
     {
         var env = new PasswordState(envHash, DerivedStamp(envHash));
+        // Never follow a symlinked store (same rule as AtomicJsonFile): treat it as a broken store, not an absent one.
+        if (new FileInfo(_path).LinkTarget is not null) throw Corrupt();
         if (!File.Exists(_path))
         {
             // File.Exists is also false for a dangling symlink or a directory in the way: that is a broken store,

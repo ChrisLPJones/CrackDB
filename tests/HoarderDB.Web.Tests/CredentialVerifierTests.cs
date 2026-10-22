@@ -35,6 +35,24 @@ public class CredentialVerifierTests
     }
 
     [Fact]
+    public void SymlinkedStoreToExistingFile_IsRefused()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var dir = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
+        HoarderDbWebFactory.EnsureThrowaway(dir);
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var real = Path.Combine(dir, "elsewhere.json");
+            File.WriteAllText(real, "{}");
+            File.CreateSymbolicLink(Path.Combine(dir, AdminPasswordStore.FileName), real);
+            var store = new AdminPasswordStore(dir);
+            Assert.Throws<InvalidOperationException>(() => store.Load("env-hash", _ => true));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void DanglingStoreLink_FailsInsteadOfFallingBackToEnvHash()
     {
         if (OperatingSystem.IsWindows()) return;

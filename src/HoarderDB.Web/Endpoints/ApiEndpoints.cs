@@ -53,7 +53,7 @@ public static class ApiEndpoints
             return Results.NoContent();
         });
 
-        api.MapGet("/dbs/{name}/stats", (string name, bool? full, IDbManager dbs) =>
+        api.MapGet("/dbs/{name}/stats", (string name, bool? full, IDbManager dbs, CancellationToken ct) =>
         {
             using var lease = dbs.AcquireRead(name);
             var isFull = full == true;
@@ -61,7 +61,7 @@ public static class ApiEndpoints
             // Script-only: the UI uses GET /dbs/{name}/length-breakdown (stored) + POST /api/jobs/length-breakdown.
             // This stays a live, slow scan and never writes the stored breakdown (single writer = the job queue).
             var lengths = isFull
-                ? lease.Db.LengthDistribution().Select(x => new { length = x.length, count = x.count }).ToList()
+                ? lease.Db.LengthDistribution(ct).Select(x => new { length = x.length, count = x.count }).ToList()
                 : null;
             return Results.Ok(new { name, estimatedCount = lease.Db.EstimatedCount(), full = isFull, lengths });
         });
@@ -80,14 +80,14 @@ public static class ApiEndpoints
             });
         });
 
-        api.MapGet("/dbs/{name}/count", (string name, int? min, int? max, int? length, IDbManager dbs) =>
+        api.MapGet("/dbs/{name}/count", (string name, int? min, int? max, int? length, IDbManager dbs, CancellationToken ct) =>
         {
             if (Validate(ref min, ref max, length, null) is { } bad) return bad;
             using var lease = dbs.AcquireRead(name);
             if (min is null && max is null)
                 return Results.Ok(new { name, min, max, exact = false, count = lease.Db.EstimatedCount() });
             // TODO(P3): move to job system. Exact count is a full range scan; it can block on a huge DB.
-            return Results.Ok(new { name, min, max, exact = true, count = lease.Db.CountRange(min, max) });
+            return Results.Ok(new { name, min, max, exact = true, count = lease.Db.CountRange(min, max, ct) });
         });
 
         api.MapGet("/dbs/{name}/lookup", (string name, string? word, IDbManager dbs) =>

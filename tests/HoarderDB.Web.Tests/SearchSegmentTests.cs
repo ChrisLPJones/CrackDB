@@ -180,6 +180,57 @@ public sealed class SearchSegmentTests : IDisposable
     }
 
     [Fact]
+    public void FlushBatchCap_ZeroOrNegative_IsClampedToOne()
+    {
+        SearchRunner.FlushBatchCap = 0;
+        Assert.Equal(1, SearchRunner.EffectiveFlushBatchCap);
+        SearchRunner.FlushBatchCap = -5;
+        Assert.Equal(1, SearchRunner.EffectiveFlushBatchCap);
+        SearchRunner.FlushBatchCap = 7;
+        Assert.Equal(7, SearchRunner.EffectiveFlushBatchCap);
+    }
+
+    // Raw keys that are not valid UTF-8 (the engine stores any bytes): the byte matcher (case-sensitive contains) and
+    // the string matcher (decoded lossily) must give the same spool, end to end through the runner.
+    [Theory]
+    [InlineData(false, true)]    // case-sensitive contains: byte path
+    [InlineData(true, true)]     // ignore-case contains: string path
+    public void InvalidUtf8Keys_SearchEqualsStringOracle(bool ignoreCase, bool contains)
+    {
+        var path = Seed("Test_rawkeys", new[] { "needle1", "xxneedlexx", "unrelated" });
+        var raw = new[]
+        {
+            new byte[] { (byte)'n', (byte)'e', (byte)'e', (byte)'d', (byte)'l', (byte)'e', 0xFF },          // needle\xFF
+            new byte[] { 0xFF, (byte)'n', (byte)'e', (byte)'e', (byte)'d', (byte)'l', (byte)'e' },          // \xFFneedle
+            new byte[] { (byte)'n', (byte)'e', 0xFF, (byte)'e', (byte)'d', (byte)'l', (byte)'e' },          // ne\xFFedle: no match
+            new byte[] { 0xC3, (byte)'n', (byte)'e', (byte)'e', (byte)'d', (byte)'l', (byte)'e', 0xE6, 0x97 },   // truncated multi-byte around it
+        };
+        using (var rdb = RocksDbSharp.RocksDb.Open(new RocksDbSharp.DbOptions(), path))
+            foreach (var k in raw)
+            {
+                var key = new byte[4 + k.Length];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(key, k.Length);
+                k.CopyTo(key, 4);
+                rdb.Put(key, new byte[] { 0 });
+            }
+
+        var spec = new SearchSpec("needle", ignoreCase, contains);
+        var (expected, _) = Oracle(path, spec);
+        Assert.Contains(expected, m => m.Contains('\uFFFD'));   // the invalid keys really are hits
+
+        var (mgr, spool, reg) = Host();
+        try
+        {
+            var run = Start(mgr, "Test_rawkeys", spec, spool, reg);
+            run.Join();
+            Assert.Equal(JobStatus.Completed, run.Job.Status);
+            Assert.Equal(expected.OrderBy(x => x, StringComparer.Ordinal), run.Matches().OrderBy(x => x, StringComparer.Ordinal));
+            spool.DisposeAll();
+        }
+        finally { mgr.DisposeAsync().AsTask().Wait(); }
+    }
+
+    [Fact]
     public void SegmentLog_IsNumbersOnly()
     {
         Seed("Test_log", Fixture());

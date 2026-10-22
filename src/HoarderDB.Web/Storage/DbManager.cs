@@ -314,6 +314,14 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
             lock (entry.Gate)
             {
                 while (entry.Readers > 0 && DateTime.UtcNow < deadline) Monitor.Wait(entry.Gate, 100);
+                if (entry.Readers > 0)
+                {
+                    // Deadline passed with a reader still active: disposing under it would crash the reader.
+                    // The process is exiting anyway; leave the handle open and say so (numbers only).
+                    _logger?.LogWarning("Shutdown deadline reached with {Readers} active reader(s); skipping close of one database handle.", entry.Readers);
+                    Monitor.PulseAll(entry.Gate);
+                    continue;
+                }
                 entry.Handle?.Dispose();
                 entry.Handle = null;
                 Monitor.PulseAll(entry.Gate);

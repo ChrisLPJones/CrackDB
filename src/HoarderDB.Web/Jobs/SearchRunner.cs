@@ -133,6 +133,8 @@ public static class SearchRunner
 
     // Max spool batches per Flush call in the drainer loop (internal test knob; restore it).
     internal static int FlushBatchCap { get; set; } = 2;
+    // Clamped so a zero or negative knob can never make the drainer spin without flushing anything.
+    internal static int EffectiveFlushBatchCap => Math.Max(1, FlushBatchCap);
 
     private static void Scan(Job job, SearchSpec spec, IDbManager dbs, IDiskSpace disk, string spoolDir,
         CancellationToken ct, ISearchProgressHook hook, ILogger log)
@@ -234,7 +236,7 @@ public static class SearchRunner
                             if (!backlog) buf.WaitActivity(20);
                             if (ct.IsCancellationRequested || buf.Fault != null) break;
                             bool workersGone = running.CurrentCount == 0;
-                            var fr = Flush(FlushBatchCap);
+                            var fr = Flush(EffectiveFlushBatchCap);
                             if (fr == FlushResult.LowDisk) { lowDisk = true; break; }
                             backlog = fr == FlushResult.More;
                             long now = Stopwatch.GetTimestamp();
@@ -284,7 +286,7 @@ public static class SearchRunner
             ct.ThrowIfCancellationRequested();
             while (!lowDisk)   // final drain: empties everything (the cap only bounds the in-lease loop, where yields are polled)
             {
-                var fr = Flush(FlushBatchCap);
+                var fr = Flush(EffectiveFlushBatchCap);
                 if (fr == FlushResult.LowDisk) lowDisk = true;
                 else if (fr == FlushResult.Done) break;
                 else ct.ThrowIfCancellationRequested();

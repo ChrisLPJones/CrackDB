@@ -22,7 +22,7 @@ public sealed class StorageOptions
 
     /// <summary>
     /// Memory (MB) one open database may use for write buffers and the import pipeline.
-    /// 0 or unset = auto (half of the memory available to the process); otherwise at least 256.
+    /// 0 or unset = auto (half of the memory available to the process); otherwise 256..1048576.
     /// </summary>
     public long ImportMemoryMb { get; set; }
 
@@ -57,6 +57,9 @@ public sealed class UploadOptionsValidator : IValidateOptions<UploadOptions>
 
 public sealed class StorageOptionsValidator : IValidateOptions<StorageOptions>
 {
+    /// <summary>Sanity ceiling (1 TiB in MB): a typo must not overflow the MB-to-bytes conversion.</summary>
+    public const long MaxImportMemoryMb = 1_048_576;
+
     public ValidateOptionsResult Validate(string? name, StorageOptions o)
     {
         var errors = new List<string>();
@@ -68,8 +71,8 @@ public sealed class StorageOptionsValidator : IValidateOptions<StorageOptions>
             errors.Add("Storage:KeyPath is required (env CRACKDB_Storage__KeyPath or HOARDERDB_Storage__KeyPath).");
         if (!string.IsNullOrWhiteSpace(o.IncomingRoot) && !Directory.Exists(o.IncomingRoot))
             errors.Add("Storage:IncomingRoot does not exist or is not a directory.");
-        if (o.ImportMemoryMb < 0 || (o.ImportMemoryMb > 0 && o.ImportMemoryMb < 256))
-            errors.Add("Storage:ImportMemoryMb must be 0 (auto) or at least 256.");
+        if (o.ImportMemoryMb < 0 || (o.ImportMemoryMb > 0 && o.ImportMemoryMb < 256) || o.ImportMemoryMb > MaxImportMemoryMb)
+            errors.Add($"Storage:ImportMemoryMb must be 0 (auto) or 256..{MaxImportMemoryMb}.");
         if (o.ScanThreads < 0 || o.ScanThreads > HoarderDB.ScanLimiter.MaxCap)
             errors.Add($"Storage:ScanThreads must be 0 (auto) or 1..{HoarderDB.ScanLimiter.MaxCap}.");
         if (o.MaxSubcompactions < 0 || o.MaxSubcompactions > HoarderDB.ScanLimiter.MaxCap)

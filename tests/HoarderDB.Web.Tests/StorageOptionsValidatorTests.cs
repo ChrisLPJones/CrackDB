@@ -19,6 +19,9 @@ public class StorageOptionsValidatorTests
     [InlineData(255, false)]
     [InlineData(256, true)]
     [InlineData(768, true)]
+    [InlineData(1_048_576, true)]
+    [InlineData(1_048_577, false)]
+    [InlineData(long.MaxValue, false)]
     public void ImportMemoryMb_Bounds(long mb, bool ok) => Assert.Equal(ok, Ok(mb));
 
     [Theory]
