@@ -187,7 +187,7 @@ internal static class ExportPipeline
     {
         if (limit.HasValue || limiter.Cap < 2 || !lease.Db.ParallelScanAllowed) return null;
         int got = limiter.TryAcquireUpTo(Math.Min(MaxWorkers, limiter.Cap - 1));
-        if (got == 0) return null;
+        if (got < 2) { limiter.Release(got); return null; }   // one worker adds nothing over D1 and could take the last free permit
         try
         {
             var tiles = lease.Db.PlanSearchTiles(min, max, limiter.Cap, ct, TileTargetBytes);

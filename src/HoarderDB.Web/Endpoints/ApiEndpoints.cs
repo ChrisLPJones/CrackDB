@@ -317,7 +317,8 @@ internal sealed class StreamingExportResult(DbLease lease, string name, int? min
                 : ExportFileName.ContentDisposition(ExportFileName.Sanitise(filename));
 
             var log = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("HoarderDB.Web.Export");
-            plan = limiter is null ? null : ExportPipeline.TryPlan(lease, limiter, min, max, limit, ct);
+            try { plan = limiter is null ? null : ExportPipeline.TryPlan(lease, limiter, min, max, limit, ct); }
+            catch (Exception e) when (e is not OperationCanceledException) { plan = null; }   // planning is an optimisation: serial fallback (TryPlan releases its permits)
             await ExportPipeline.RunAsync(lease, ctx.Response.Body, min, max, limit, log, ctx.Abort, ct, plan);
         }
         // RunAsync has joined its reader/workers (and disposed every cursor) on every path before this releases the lease;

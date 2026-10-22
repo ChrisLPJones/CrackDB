@@ -303,22 +303,26 @@ public sealed class ExportParallelTests : IDisposable
     }
 
     [Fact]
-    public async Task TwoPermitCap_UsesOneWorker_LeavesTheLastPermitFree()
+    public async Task TwoPermitCap_NeverFansOut_PermitsUntouched()
     {
         MakeDb("Test_many", 10);
         var mgr = Host(2);
-        var lease = mgr.AcquireRead("Test_many");
-        var plan = ExportPipeline.TryPlan(lease, mgr.ScanLimiter, null, null, null, default);
-        Assert.NotNull(plan);
-        Assert.Equal(1, plan!.Workers);
-        Assert.Equal(1, mgr.ScanLimiter.Free);
-        var expected = Oracle(mgr, "Test_many", null, null, null);
-        var ms = new MemoryStream();
-        await ExportPipeline.RunAsync(lease, ms, null, null, null, null, () => { }, default, plan).WaitAsync(TimeSpan.FromSeconds(60));
-        lease.Dispose();
-        plan.Dispose();
-        Assert.Equal(expected, ms.ToArray());
+        var o = await Run(mgr, "Test_many", null, null, null);
+        Assert.Null(o.Plan);
+        Assert.Equal(Oracle(mgr, "Test_many", null, null, null), o.Bytes);
         AssertClean(mgr);
+    }
+
+    [Fact]
+    public void OnlyOneFreePermit_NoPlan_FreeUnchanged()
+    {
+        MakeDb("Test_many", 10);
+        var mgr = Host(3);
+        Assert.Equal(2, mgr.ScanLimiter.TryAcquireUpTo(2));   // another scan holds two
+        using var lease = mgr.AcquireRead("Test_many");
+        Assert.Null(ExportPipeline.TryPlan(lease, mgr.ScanLimiter, null, null, null, default));
+        Assert.Equal(1, mgr.ScanLimiter.Free);
+        mgr.ScanLimiter.Release(2);
     }
 
     private sealed class ListLogger(List<string> lines) : Microsoft.Extensions.Logging.ILogger
