@@ -19,6 +19,7 @@ public sealed class ScanLimiter
 
     private readonly object _gate = new();
     private int _free;
+    private int _waiting;
 
     public int Cap { get; }
 
@@ -35,6 +36,9 @@ public sealed class ScanLimiter
     /// <summary>Shared by standalone handles (CLI, tests) that were not given a limiter.</summary>
     public static ScanLimiter Default { get; } = new(AutoThreads(Environment.ProcessorCount));
 
+    /// <summary>Callers currently blocked in <see cref="AcquireUpTo"/> because no permit was free (fairness signal for long-running holders).</summary>
+    public int Waiting { get { lock (_gate) return _waiting; } }
+
     /// <summary>Permits not currently held (test/diagnostic).</summary>
     public int Free { get { lock (_gate) return _free; } }
 
@@ -47,11 +51,31 @@ public sealed class ScanLimiter
         want = Math.Clamp(want, 1, Cap);
         lock (_gate)
         {
-            while (_free == 0)
+            if (_free == 0)
             {
-                ct.ThrowIfCancellationRequested();
-                Monitor.Wait(_gate, 100);
+                _waiting++;
+                try
+                {
+                    while (_free == 0)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        Monitor.Wait(_gate, 100);
+                    }
+                }
+                finally { _waiting--; }
             }
+            int got = Math.Min(want, _free);
+            _free -= got;
+            return got;
+        }
+    }
+
+    /// <summary>Non-blocking <see cref="AcquireUpTo"/>: takes up to <paramref name="want"/> permits, 0 when none is free.</summary>
+    public int TryAcquireUpTo(int want)
+    {
+        want = Math.Clamp(want, 1, Cap);
+        lock (_gate)
+        {
             int got = Math.Min(want, _free);
             _free -= got;
             return got;

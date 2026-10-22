@@ -25,6 +25,8 @@ public interface IDbManager
     /// client-supplied; used by the job-start headroom check (see HeadroomGuard).
     /// </summary>
     long ResolvedImportBudgetBytes { get; }
+    /// <summary>The process-wide scan-thread budget shared by every db handle (a search takes its permits from it before it takes a lease).</summary>
+    ScanLimiter ScanLimiter { get; }
     /// <summary>
     /// Creates a new, empty database (left open for reads). <see cref="DbAlreadyExistsException"/> (409)
     /// if it exists, <see cref="DbLimitReachedException"/> (409) at the database-count cap.
@@ -281,6 +283,8 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         _diag.LogHandle("open", db, _scanLimiter.Cap, includeIndex: false);   // runs under entry.Gate: cheap properties only
         return db;
     }
+
+    public ScanLimiter ScanLimiter => _scanLimiter;
 
     /// <summary>The import memory budget this manager resolved at startup (configured or auto default).</summary>
     public long ResolvedImportBudgetBytes => _memoryBudgetBytes ?? MemoryPlan.DefaultBudgetBytes();

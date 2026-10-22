@@ -102,6 +102,86 @@ public sealed class ScanCursorTests(ITestOutputHelper output)
         Assert.Equal(expected, got);
     }
 
+    // ---- search tiles ---------------------------------------------------------------------------
+
+    private static List<string> WalkTiles(WordlistDatabase db, int? min, int? max, List<WordlistDatabase.Tile> tiles)
+    {
+        var got = new List<string>();
+        using var cur = db.OpenScan(min, max);       // ONE iterator reseeked per tile, as a search worker does
+        foreach (var t in tiles)
+        {
+            cur.SeekToLower(t.Lower);
+            while (cur.MoveNext() && (t.Upper == null || cur.Key.SequenceCompareTo(t.Upper) < 0)) got.Add(cur.Word);
+        }
+        return got;
+    }
+
+    [Theory]
+    [InlineData(false, null, null)]
+    [InlineData(true, null, null)]
+    [InlineData(true, 8, 9)]
+    [InlineData(true, 4, null)]
+    [InlineData(true, 25, 25)]
+    public void PlanSearchTiles_CoverTheRangeOnce_InKeyOrder_WithNoProbes(bool compacted, int? min, int? max)
+    {
+        using var t = new TempDb();
+        using var db = new WordlistDatabase(t.Path, new UTF8Encoding(false), enableAutoCompaction: false);
+        var words = ParallelScanTests.SkewedWords();
+        int n = words.Count / 5 + 1;
+        for (int i = 0; i < words.Count; i += n) db.Import(words.Skip(i).Take(n), null, null, threads: 1);
+        if (compacted) db.Compact();
+        var expected = db.Scan(min, max, null).ToList();
+        foreach (long? target in new long?[] { null, 1 })
+        {
+            var tiles = db.PlanSearchTiles(min, max, 3, default, target);
+            Assert.Equal(0, db.LastPlanProbeRanges);            // metadata only: a probe would re-read a huge file's index
+            if (target == 1 && min == null && max == null) Assert.True(tiles.Count >= 5, "tiles: " + tiles.Count);
+            Assert.Equal(expected, WalkTiles(db, min, max, tiles));
+        }
+    }
+
+    [Fact]
+    public void PlanSearchTiles_SingleTile_WhenOneThread_OrTooManyL0Files()
+    {
+        using var t = new TempDb();
+        using var db = new WordlistDatabase(t.Path, new UTF8Encoding(false), enableAutoCompaction: false);
+        for (int f = 0; f < 20; f++) db.Import(Enumerable.Range(0, 200).Select(i => "w" + f.ToString("D2") + i.ToString("D4")), null, null, threads: 1);
+        Assert.True(db.NumFilesAtLevel0() > WordlistDatabase.ParallelMaxL0Files);
+        Assert.False(db.ParallelScanAllowed);
+        Assert.Single(db.PlanSearchTiles(null, null, 3, default, 1));
+        Assert.Single(db.PlanSearchTiles(null, null, 1, default, 1));
+    }
+
+    [Fact]
+    public void SeekToLower_IsInclusive_WhereSeekToIsStrictlyAfter()
+    {
+        using var t = new TempDb();
+        using var db = t.Open();
+        db.Import(new[] { "aaaa", "aaab", "aaac" }, null, null, threads: 1);
+        using var cur = db.OpenScan(null, null);
+        cur.SeekTo(null); Assert.True(cur.MoveNext());
+        var first = cur.KeyCopy();
+        cur.SeekToLower(first);
+        Assert.True(cur.MoveNext());
+        Assert.Equal("aaaa", cur.Word);
+        cur.SeekTo(first);
+        Assert.True(cur.MoveNext());
+        Assert.Equal("aaab", cur.Word);
+    }
+
+    [Fact]
+    public void ScanLimiter_TryAcquireUpTo_NeverBlocks_AndNeverExceedsTheCap()
+    {
+        var l = new ScanLimiter(3);
+        Assert.Equal(3, l.TryAcquireUpTo(8));
+        Assert.Equal(0, l.TryAcquireUpTo(1));
+        l.Release(1);
+        Assert.Equal(1, l.TryAcquireUpTo(3));
+        Assert.Equal(0, l.Free);
+        l.Release(3);
+        Assert.Equal(3, l.Free);
+    }
+
     /// <summary>
     /// Timing spike for the plan (not a regression test): 20 x (new iterator + Seek) vs 20 x Seek on a held iterator,
     /// on one large compacted SST. Skipped unless HOARDERDB_SPIKE_MB is set (e.g. 250). Numbers go to the test output.

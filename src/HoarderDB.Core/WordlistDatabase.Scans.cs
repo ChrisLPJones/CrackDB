@@ -37,7 +37,8 @@ public sealed partial class WordlistDatabase
     /// <summary>How often the calling thread publishes the workers' shared counter to the progress callback.</summary>
     internal static int ProgressPollMs = 200;
 
-    internal readonly record struct Tile(byte[]? Lower, byte[]? Upper);
+    /// <summary>A key range [Lower, Upper) in raw key bytes (null = open end). Public so a search can drive tiles itself.</summary>
+    public readonly record struct Tile(byte[]? Lower, byte[]? Upper);
 
     private static int Compare(byte[] a, byte[] b) => a.AsSpan().SequenceCompareTo(b);
 
@@ -189,7 +190,8 @@ public sealed partial class WordlistDatabase
     /// bigger length, at first password bytes) by approximate-size probes, at most MaxPlanProbeRanges in all.
     /// At most MaxPlanTiles - 1 cuts come back. Wrong guesses only unbalance the tiles, never the result.
     /// </summary>
-    internal List<byte[]> PlanCuts(byte[]? start, byte[]? end, int threads, long? targetOverride, CancellationToken ct)
+    internal List<byte[]> PlanCuts(byte[]? start, byte[]? end, int threads, long? targetOverride, CancellationToken ct,
+        int? probeBudget = null, bool lengthCuts = false)
     {
         ct.ThrowIfCancellationRequested();
         LastPlanProbeRanges = 0;
@@ -214,14 +216,26 @@ public sealed partial class WordlistDatabase
             if (PrefixOf(f.Largest) is { } b) cuts.Add(b);
         }
 
+        // Metadata-only length cuts (a search plans this way: no probe may touch a huge file's index): a file spanning
+        // several lengths gets a cut at every length boundary inside it, so a 70 GB file is still many tiles.
+        if (lengthCuts)
+            foreach (var f in files)
+            {
+                if (f.Smallest.Length < 4 || f.Largest.Length < 4) continue;
+                uint lo = BinaryPrimitives.ReadUInt32BigEndian(f.Smallest), hi = BinaryPrimitives.ReadUInt32BigEndian(f.Largest);
+                if (hi <= lo || hi - lo > 256) continue;
+                for (ulong l = (ulong)lo + 1; l <= hi; l++) { var p = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(p, (uint)l); cuts.Add(p); }
+            }
+
         // Split the oversized files (biggest first) while the probe budget lasts.
-        int budget = MaxPlanProbeRanges;
+        int initialBudget = probeBudget ?? MaxPlanProbeRanges;
+        int budget = initialBudget;
         foreach (var f in files.Where(f => f.Size > 2 * target).OrderByDescending(f => f.Size))
         {
             if (budget <= 0) break;
             ProbeFile(f, target, cuts, ref budget, ct);
         }
-        LastPlanProbeRanges = MaxPlanProbeRanges - budget;
+        LastPlanProbeRanges = initialBudget - budget;
 
         // Dedup, and thin evenly if over the cap (the thinned-out cuts only make tiles bigger).
         var sorted = cuts.Where(c => (start == null || Compare(c, start) > 0) && (end == null || Compare(c, end) < 0)).ToList();
@@ -271,6 +285,23 @@ public sealed partial class WordlistDatabase
             PickBySize(cand2, target, cuts);
         }
     }
+
+    /// <summary>
+    /// Tiles for a parallel search over the keys whose length is in [min, max], in key order, planned from the live-file
+    /// metadata only (no seek, no approximate-size probe: either would re-read a huge SST file's whole index).
+    /// A single tile when the db has too many L0 files to scan in parallel (see <see cref="ParallelScanAllowed"/>).
+    /// Tiles never overlap or leave a gap for any data; data only affects the balance.
+    /// </summary>
+    public List<Tile> PlanSearchTiles(int? min, int? max, int threads, CancellationToken ct, long? targetBytes = null)
+    {
+        var start = LengthPrefix(min ?? 0);
+        var end = UpperBoundFor(max);
+        if (threads <= 1 || !ParallelAllowedByL0()) return MakeTiles(Array.Empty<byte[]>(), start, end);
+        return MakeTiles(PlanCuts(start, end, threads, targetBytes, ct, probeBudget: 0, lengthCuts: true), start, end);
+    }
+
+    /// <summary>True while the L0 file count allows parallel scans (index memory grows with iterators x L0 files).</summary>
+    public bool ParallelScanAllowed => ParallelAllowedByL0();
 
     // ---- Parallel engine --------------------------------------------------------------------------
 
