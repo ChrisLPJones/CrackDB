@@ -135,6 +135,7 @@ public static class SearchRunner
         var spool = job.Spool ?? throw new InvalidOperationException("Search job has no result spool.");
         var (min, max) = SearchMatcher.EffectiveRange(spec);
         var isMatch = SearchMatcher.Compile(spec);
+        var fast = SearchMatcher.CompileUtf8(spec);   // case-sensitive contains only; null = string matcher
         var limiter = dbs.ScanLimiter;
         List<WordlistDatabase.Tile>? tiles = null;   // planned once, on the first lease; tiles hold for any data, so they stay valid across segments
         OrderedTileBuffers? buf = null;
@@ -208,7 +209,7 @@ public static class SearchRunner
                             running.AddCount();
                             var t = new Thread(() =>
                             {
-                                try { RunWorker(db, min, max, tiles, buf, isMatch, token); }
+                                try { RunWorker(db, min, max, tiles, buf, isMatch, fast, token); }
                                 catch (OperationCanceledException) when (token.IsCancellationRequested) { }
                                 catch (Exception e) { buf.Fail(e); try { segCts.Cancel(); } catch (ObjectDisposedException) { } }
                                 finally { running.Signal(); }
@@ -315,7 +316,7 @@ public static class SearchRunner
     // One worker: ONE iterator for its whole life, reseeked per tile (or per resume cursor). Matches, the raw cursor and the key
     // count go to the ordered buffers together, once per stride; the worker never touches the spool or the filesystem.
     private static void RunWorker(WordlistDatabase db, int? min, int? max, IReadOnlyList<WordlistDatabase.Tile> tiles,
-        OrderedTileBuffers buf, Func<string, bool> isMatch, CancellationToken token)
+        OrderedTileBuffers buf, Func<string, bool> isMatch, SearchMatcher.Utf8Match? fast, CancellationToken token)
     {
         using var cur = db.OpenScan(min, max);
         var local = new List<string>();
@@ -332,9 +333,17 @@ public static class SearchRunner
                 bool done = !cur.MoveNext() || (upper is not null && cur.Key.SequenceCompareTo(upper) >= 0);
                 if (!done)
                 {
-                    var word = cur.Word;
                     keys++;
-                    if (isMatch(word)) { local.Add(word); chars += word.Length; }
+                    if (fast is not null)
+                    {
+                        // Match on the raw UTF-8 after the length prefix; decode only hits (same lossy decode as the string path).
+                        if (fast(cur.Key.Slice(4))) { var hit = cur.Word; local.Add(hit); chars += hit.Length; }
+                    }
+                    else
+                    {
+                        var word = cur.Word;
+                        if (isMatch(word)) { local.Add(word); chars += word.Length; }
+                    }
                     if (keys < StrideKeys) continue;
                 }
                 var last = done ? null : cur.KeyCopy();   // exact resume point, taken while the iterator is still on it

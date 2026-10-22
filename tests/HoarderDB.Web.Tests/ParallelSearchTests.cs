@@ -227,6 +227,38 @@ public sealed class ParallelSearchTests : IDisposable
         }
     }
 
+    // Case-sensitive contains runs on raw UTF-8 bytes (decode only for hits): the spool must still equal the old string path.
+    [Theory]
+    [InlineData("e", false)]               // match-dense
+    [InlineData("zzzz", false)]            // zero matches
+    [InlineData("nee\0d", false)]          // NUL in the query
+    [InlineData("日本needle", false)]       // non-ASCII
+    [InlineData("😀needle", false)]
+    [InlineData("needle\uFFFF", false)]
+    [InlineData("needle\uFFFD", false)]    // U+FFFD in the query: string fallback
+    [InlineData("pässw", false)]
+    [InlineData("NEEDLE", false)]
+    [InlineData("nEEdle", true)]           // ignore-case stays on strings
+    [InlineData("Wörd", true)]
+    public void Spool_CaseSensitiveBytePath_EqualsOldPath(string query, bool ignoreCase)
+    {
+        var path = MakeDb("Test_fast_" + Guid.NewGuid().ToString("N")[..8], "manyL0");
+        var spec = new SearchSpec(query, ignoreCase, true);
+        var (expected, keys) = Oracle(path, spec);
+        foreach (int cap in new[] { 1, 2, 3 })
+        {
+            var mgr = Host(cap, out var spool, out var reg);
+            var run = Start(mgr, Path.GetFileName(path), spec, spool, reg);
+            run.Join();
+            Assert.Equal(JobStatus.Completed, run.Job.Status);
+            Assert.True(expected.SequenceEqual(run.Matches()), $"spool differs: cap {cap} query {query.Length} chars");
+            Assert.Equal(keys, run.Job.Snapshot().ScannedCount);
+            spool.DisposeAll();
+            mgr.DisposeAsync().AsTask().Wait();
+            _mgrs.Remove(mgr);
+        }
+    }
+
     [Fact]
     public void MatchDense_TinyBuffers_FinishesInOrder_NoDeadlock()
     {
