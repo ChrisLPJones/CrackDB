@@ -212,6 +212,12 @@ public sealed partial class SearchSpool(DataRootResolver data, ILogger<SearchSpo
                 if (OperatingSystem.IsWindows()) Directory.CreateDirectory(dir);
                 else Directory.CreateDirectory(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
+            else if (!OperatingSystem.IsWindows())
+            {
+                // A pre-existing directory (older run, umask, operator) may be wider than 0700: enforce it.
+                const UnixFileMode want = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+                if (File.GetUnixFileMode(dir) != want) File.SetUnixFileMode(dir, want);
+            }
             return true;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)

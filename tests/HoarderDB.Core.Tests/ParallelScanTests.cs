@@ -387,6 +387,19 @@ public sealed class ParallelScanTests : IDisposable
     }
 
     [Fact]
+    public void CountRange_WaitingForPermits_IsCancellable()
+    {
+        using var t = new TempDb();
+        var limiter = new ScanLimiter(2);
+        using var db = Seeded(t, limiter);
+        Assert.Equal(2, limiter.AcquireUpTo(2, default));   // every permit held elsewhere: the scan must wait
+        using var cts = new CancellationTokenSource(100);
+        Assert.Throws<OperationCanceledException>(() => db.CountRangeCore(null, null, 2, 0, 1, cts.Token));
+        limiter.Release(2);
+        Assert.Equal(2, limiter.Free);
+    }
+
+    [Fact]
     public void ScanLimiter_Validation_AndAcquire()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new ScanLimiter(0));

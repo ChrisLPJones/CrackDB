@@ -31,8 +31,9 @@ public static class SearchMatcher
     /// <summary>
     /// Byte-level matcher for the one mode where it is provably identical to <see cref="Compile"/>: case-sensitive
     /// contains. UTF-8 is self-synchronising, so a valid query's bytes can only match at character boundaries of the stored
-    /// bytes, and a stored key with invalid bytes (decoded lossily to U+FFFD by the string path) can never match a query
-    /// that has no U+FFFD, in either path. Returns null (use the string matcher) for everything else: ignore-case (needs
+    /// bytes, and a stored key with invalid bytes (decoded lossily to U+FFFD by the string path) matches only through its
+    /// valid parts, identically in both paths (a key like <c>needle\xFF</c> matches "needle" in both; the invalid byte can
+    /// never be part of a match for a query without U+FFFD). Returns null (use the string matcher) for everything else: ignore-case (needs
     /// string folding, no byte folding), exact (scanned only as ignore-case), and a query with a lone surrogate or
     /// U+FFFD (the string path compares those as UTF-16 units, bytes would not).
     /// </summary>

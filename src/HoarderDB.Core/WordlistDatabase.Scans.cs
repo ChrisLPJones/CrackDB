@@ -391,8 +391,8 @@ public sealed partial class WordlistDatabase
     // ---- CountRange -------------------------------------------------------------------------------
 
     /// <summary>Exact count of passwords with length in [min, max] (full range scan).</summary>
-    public long CountRange(int? min, int? max) =>
-        CountRangeCore(min, max, threads: null, minKeys: null, splitBytesOverride: null, default);
+    public long CountRange(int? min, int? max, CancellationToken ct = default) =>
+        CountRangeCore(min, max, threads: null, minKeys: null, splitBytesOverride: null, ct);
 
     internal long CountRangeCore(int? min, int? max, int? threads, long? minKeys, long? splitBytesOverride, CancellationToken ct)
     {
