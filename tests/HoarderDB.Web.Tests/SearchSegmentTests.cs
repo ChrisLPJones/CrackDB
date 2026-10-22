@@ -166,7 +166,7 @@ public sealed class SearchSegmentTests : IDisposable
                 var s = run.Hook.Scanned;
                 Assert.Equal(s.OrderBy(x => x), s);
                 Assert.Equal(keys, s[^1]);
-                Assert.Equal(s.Count, WordlistDatabase.CursorsOpened - before);
+                Assert.True(WordlistDatabase.CursorsOpened - before >= s.Count, "at least one iterator per segment");   // one per worker per segment: see ParallelSearchTests
                 if (age == TimeSpan.Zero) Assert.True(s.Count >= 3, "expected >= 3 forced yields, got " + s.Count);
                 else Assert.Single(s);
                 spool.DisposeAll();
@@ -190,7 +190,7 @@ public sealed class SearchSegmentTests : IDisposable
                 Assert.True(run.Log.Lines.Count >= 3);
                 Assert.All(run.Log.Lines, l =>
                 {
-                    Assert.Matches(@"^Search segment: seek \d+ ms, \d+ keys, scan \d+ ms, \d+ matches, (end|yield)$", l);
+                    Assert.Matches(@"^Search segment: \d+ workers, \d+ of \d+ tiles done, \d+ keys, scan \d+ ms, \d+ matches, (end|yield)$", l);
                     Assert.DoesNotContain("needle", l, StringComparison.OrdinalIgnoreCase);
                 });
             }

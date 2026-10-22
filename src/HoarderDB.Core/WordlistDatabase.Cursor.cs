@@ -61,6 +61,18 @@ public sealed partial class WordlistDatabase
             _valid = false;
         }
 
+        /// <summary>
+        /// Positions the cursor AT the first key that is &gt;= <paramref name="lower"/> (inclusive, a tile start);
+        /// null starts at the first key of the range. The caller compares keys against the tile's upper bound.
+        /// </summary>
+        public void SeekToLower(byte[]? lower)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _it.Seek(lower ?? LengthPrefix(_lo));
+            _fresh = true;
+            _valid = false;
+        }
+
         /// <summary>Advances to the next in-range key; the first call after <see cref="SeekTo"/> returns the key it landed on.</summary>
         public bool MoveNext()
         {

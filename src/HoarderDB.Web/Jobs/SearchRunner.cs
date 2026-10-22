@@ -20,7 +20,9 @@ public sealed class NoopSearchProgressHook : ISearchProgressHook
 /// whole scan and delay every unrelated import/compact behind it) and never by holding one
 /// <see cref="IDbManager.AcquireRead"/> lease for the whole scan (that would itself stall a future
 /// write window on this job's own db indefinitely, per <see cref="DbManager"/>'s untimed write-gate
-/// spin-wait). Instead it holds ONE iterator for a lease segment and yields on demand: the segment ends when a
+/// spin-wait). Instead it takes its scan-thread permits, then a lease, and runs up to T worker threads over key-ordered
+/// tiles (each worker holds ONE iterator for the segment; a small ordered-buffer class lets the search thread, the only spool
+/// writer, append matches strictly in tile order, so the spool equals the serial scan's) and yields on demand: the segment ends when a
 /// write window is waiting (<see cref="DbLease.WriterWaiting"/>), at shutdown, on cancel or at
 /// <see cref="MaxLeaseAge"/>, then it re-acquires the lease (Busy back-off) and resumes from a raw-key cursor. So it only
 /// ever contends with a write window on its own database - exactly like any ordinary read today - and never touches the
@@ -48,15 +50,22 @@ public static class SearchRunner
     /// <summary>Test seam, null in production: called with the scanned count at every stride while the lease is held (lets a test slow or pause a scan deterministically).</summary>
     internal static Action<long>? StrideHook { get; set; }
 
-    // Keys between cancel / age / writer-waiting checks. ~1 ms of scanning at the measured count rate.
+    // Keys a worker scans between cancel checks and commits to the ordered buffers. ~1 ms of scanning at the measured count rate.
     private const int StrideKeys = 256;
     // How often the lease is polled for WriterWaiting / Closing (takes the entry gate, so not per stride).
     private static readonly long PollTicks = Stopwatch.Frequency / 50;   // ~20 ms
-    // Matches buffered before they are appended to the spool while the lease is still held (memory bound for dense queries).
-    private const int FlushMatches = 64 * 1024;
-    private const long FlushChars = 8L * 1024 * 1024;
-    // Progress visibility: matches and counts are published at least this often during a long segment.
-    private static readonly long PublishTicks = Stopwatch.Frequency * 2;
+    // Per-tile match buffer caps and the size of one spool append (memory bound for dense queries): window x cap in all.
+    // Test knobs (restore them): a tiny cap makes a match-dense query stall every non-head tile.
+    internal static int BufferMatches { get; set; } = 64 * 1024;
+    internal static long BufferChars { get; set; } = 8L * 1024 * 1024;
+    // Progress visibility: the scanned count is published at least this often during a long segment.
+    private static readonly long PublishTicks = Stopwatch.Frequency / 5;   // ~200 ms
+
+    /// <summary>Test knob: tile size target in bytes of live files (null = total / (threads x 8)); small values make many tiles on a small db.</summary>
+    internal static long? TileTargetBytes { get; set; }
+
+    /// <summary>Shown while the search waits for a scan thread (a breakdown or another scan holds every permit).</summary>
+    public const string WaitingForThreadNote = "Waiting for a free scan thread.";
 
     // Independent of JobQueue's channel and of JobEndpoints.UploadGate: one search job at a time,
     // globally (not per-db) - the simplest IO-contention story, and the one real server-side lever
@@ -123,40 +132,130 @@ public static class SearchRunner
         var spool = job.Spool ?? throw new InvalidOperationException("Search job has no result spool.");
         var (min, max) = SearchMatcher.EffectiveRange(spec);
         var isMatch = SearchMatcher.Compile(spec);
-        long scanned = 0;
-        byte[]? cursor = null;   // raw key of the last scanned key; null = start of the range
+        var limiter = dbs.ScanLimiter;
+        List<WordlistDatabase.Tile>? tiles = null;   // planned once, on the first lease; tiles hold for any data, so they stay valid across segments
+        OrderedTileBuffers? buf = null;
         DateTime? busySince = null;
-        var pending = new List<string>();
-        long pendingChars = 0;
+        var batch = new List<string>();
 
-        // Appends the buffered matches (key order) to the spool. False = low disk: the scan stops, keeping what is already written.
+        // Drains the ordered prefix into the spool (this thread is the ONLY spool writer). False = low disk: the scan stops,
+        // keeping what is already written (the drained batch is dropped, so the spool is still an exact ordered prefix).
         bool Flush()
         {
-            if (pending.Count == 0) return true;
-            if (disk.FreeBytes(spoolDir) is { } free && free < SearchSpool.ReserveBytes)
+            while (true)
             {
-                // The DB shares this volume and compaction needs headroom: keep what we have and stop.
-                job.SetScanned(scanned);
-                job.SetMatched(spool.Count, capped: true);
-                job.Note = "Stopped: low disk space; " + spool.Count.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " matches kept.";
-                return false;
+                batch.Clear();
+                if (buf!.Drain(batch) == 0) return true;
+                if (disk.FreeBytes(spoolDir) is { } free && free < SearchSpool.ReserveBytes)
+                {
+                    // The DB shares this volume and compaction needs headroom: keep what we have and stop.
+                    job.SetScanned(buf.Scanned);
+                    job.SetMatched(spool.Count, capped: true);
+                    job.Note = "Stopped: low disk space; " + spool.Count.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " matches kept.";
+                    return false;
+                }
+                spool.Append(batch);
+                job.SetMatched(spool.Count, capped: false);
             }
-            spool.Append(pending);
-            pending.Clear();
-            pendingChars = 0;
-            job.SetMatched(spool.Count, capped: false);
-            return true;
         }
 
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            DbLease lease;
-            try { lease = dbs.AcquireRead(job.DbName); }
-            catch (DbBusyException)
+            // Permits first, then the lease; both go back at every yield (a 30 min Busy back-off must never hold scan threads).
+            int held = AcquirePermits(job, limiter, ct);
+            DbLease? lease = null;
+            bool busy = false, lowDisk = false, exhausted = false;
+            Exception? fault = null;
+            int workers = 0;
+            long segStartKeys = 0, segStartMatches = spool.Count, scanMs = 0;
+            string reason = "end";
+            try
+            {
+                try { lease = dbs.AcquireRead(job.DbName); }
+                catch (DbBusyException) { busy = true; }
+                if (!busy)
+                {
+                    if (busySince is not null) { busySince = null; job.Note = null; }
+                    // Parallel only while the L0 count allows it (every iterator holds every L0 file's index); else one worker, same code.
+                    bool parallel = lease!.Db.ParallelScanAllowed;
+                    if (tiles is null)
+                    {
+                        tiles = lease.Db.PlanSearchTiles(min, max, parallel ? limiter.Cap : 1, ct, TileTargetBytes);
+                        buf = new OrderedTileBuffers(tiles.Count, BufferMatches, BufferChars);
+                    }
+                    workers = Math.Max(1, Math.Min(parallel ? held : 1, tiles.Count));
+                    if (held > workers) { limiter.Release(held - workers); held = workers; }
+                    buf!.SetWindow(2 * workers);
+                    segStartKeys = buf.Scanned;
+
+                    // One lease segment: up to `workers` threads, each holding ONE iterator, end on demand (writer waiting, shutdown,
+                    // cancel, MaxLeaseAge, low disk). Every worker is joined BEFORE the lease is released (the iterators pin the handle).
+                    using var segCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    using var wake = segCts.Token.Register(buf.Wake);
+                    var db = lease.Db;
+                    var token = segCts.Token;
+                    var running = new CountdownEvent(1);
+                    var threads = new List<Thread>();
+                    var scanSw = Stopwatch.StartNew();
+                    try
+                    {
+                        for (int i = 0; i < workers; i++)
+                        {
+                            running.AddCount();
+                            var t = new Thread(() =>
+                            {
+                                try { RunWorker(db, min, max, tiles, buf, isMatch, token); }
+                                catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+                                catch (Exception e) { buf.Fail(e); try { segCts.Cancel(); } catch (ObjectDisposedException) { } }
+                                finally { running.Signal(); }
+                            }) { IsBackground = true, Name = "hoarderdb-search" };
+                            try { t.Start(); threads.Add(t); }
+                            catch { running.Signal(); throw; }
+                        }
+                        running.Signal();   // the initial count: workers hold the rest
+
+                        long start = Stopwatch.GetTimestamp(), lastPoll = start, lastPublish = start;
+                        while (true)
+                        {
+                            buf.WaitActivity(20);
+                            if (ct.IsCancellationRequested || buf.Fault != null) break;
+                            bool workersGone = running.CurrentCount == 0;
+                            if (!Flush()) { lowDisk = true; break; }
+                            long now = Stopwatch.GetTimestamp();
+                            if (now - lastPublish >= PublishTicks) { lastPublish = now; job.SetScanned(buf.Scanned); }
+                            if (buf.AllDrained) { exhausted = true; break; }
+                            if (workersGone) break;
+                            bool yield = buf.Scanned > segStartKeys && Stopwatch.GetElapsedTime(start, now) >= MaxLeaseAge;
+                            if (!yield && now - lastPoll >= PollTicks)
+                            {
+                                lastPoll = now;
+                                yield = lease.Closing || lease.WriterWaiting;
+                            }
+                            if (yield) { reason = "yield"; break; }
+                        }
+                    }
+                    finally
+                    {
+                        try { segCts.Cancel(); } catch (ObjectDisposedException) { }
+                        foreach (var t in threads) t.Join();   // BEFORE the lease (and so the handle) can go away
+                        running.Dispose();
+                        buf.ReleaseRunning();
+                        scanMs = scanSw.ElapsedMilliseconds;
+                    }
+                    fault = buf.Fault;
+                }
+            }
+            finally
+            {
+                lease?.Dispose();
+                limiter.Release(held);
+            }
+
+            if (busy)
             {
                 // A write window started on this db meanwhile: back off and retry from the same
-                // cursor - symmetric with how an ordinary read already treats a busy db, just retried
+                // cursors - symmetric with how an ordinary read already treats a busy db, just retried
                 // instead of surfaced to a client. While waiting, this holds the one server-wide search
                 // slot, so give up after BusyTimeout rather than lock searches on other dbs out forever.
                 busySince ??= DateTime.UtcNow;
@@ -165,70 +264,76 @@ public static class SearchRunner
                 ct.WaitHandle.WaitOne(BusyRetry);
                 continue;
             }
-            if (busySince is not null) { busySince = null; job.Note = null; }
 
-            // One lease segment: ONE iterator held until the segment ends on demand (writer waiting, shutdown, cancel,
-            // MaxLeaseAge). The cursor is disposed BEFORE the lease is released (the iterator pins the handle's files).
-            bool exhausted = true;
-            bool lowDisk = false;
-            long segKeys = 0, segMatches = 0, seekMs = 0, scanMs = 0;
-            try
-            {
-                using var cur = lease.Db.OpenScan(min, max);
-                var seekSw = Stopwatch.StartNew();
-                cur.SeekTo(cursor);
-                seekMs = seekSw.ElapsedMilliseconds;
-                var scanSw = Stopwatch.StartNew();
-                long start = Stopwatch.GetTimestamp(), lastPoll = start, lastPublish = start;
-                int stride = 0;
-                while (cur.MoveNext())
-                {
-                    var word = cur.Word;
-                    scanned++;
-                    segKeys++;
-                    if (isMatch(word)) { pending.Add(word); pendingChars += word.Length; segMatches++; }
-                    if (++stride < StrideKeys) continue;
-                    stride = 0;
-                    StrideHook?.Invoke(scanned);
-                    ct.ThrowIfCancellationRequested();
-                    long now = Stopwatch.GetTimestamp();
-                    bool yield = Stopwatch.GetElapsedTime(start, now) >= MaxLeaseAge;
-                    if (!yield && now - lastPoll >= PollTicks)
-                    {
-                        lastPoll = now;
-                        yield = lease.Closing || lease.WriterWaiting;
-                    }
-                    if (pending.Count >= FlushMatches || pendingChars >= FlushChars
-                        || (pending.Count > 0 && now - lastPublish >= PublishTicks))
-                    {
-                        lastPublish = now;
-                        job.SetScanned(scanned);
-                        if (!Flush()) { lowDisk = true; break; }
-                    }
-                    else if (now - lastPublish >= PublishTicks) { lastPublish = now; job.SetScanned(scanned); }
-                    if (yield)
-                    {
-                        cursor = cur.KeyCopy();   // exact resume point (raw bytes), taken while the iterator is still on it
-                        exhausted = false;
-                        break;
-                    }
-                }
-                scanMs = scanSw.ElapsedMilliseconds;
-            }
-            finally { lease.Dispose(); }
+            if (fault is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault).Throw();
+            ct.ThrowIfCancellationRequested();
+            if (!lowDisk && !Flush()) lowDisk = true;   // remaining spool IO happens after the lease is released, so a write window never waits on the disk
+            exhausted = exhausted || buf!.AllDrained;
 
             // Numbers only: never keys, matches or query text.
-            log.LogInformation("Search segment: seek {SeekMs} ms, {Keys} keys, scan {ScanMs} ms, {Matches} matches, {Reason}",
-                seekMs, segKeys, scanMs, segMatches, lowDisk ? "low-disk" : exhausted ? "end" : "yield");
+            log.LogInformation("Search segment: {Workers} workers, {Done} of {Tiles} tiles done, {Keys} keys, scan {ScanMs} ms, {Matches} matches, {Reason}",
+                workers, buf!.DoneTiles, buf.TileCount, buf.Scanned - segStartKeys, scanMs, spool.Count - segStartMatches,
+                lowDisk ? "low-disk" : exhausted ? "end" : reason);
+            job.SetScanned(buf.Scanned);
             if (lowDisk) return;
+            hook.OnChunk(job.DbName, buf.Scanned);   // test seam: fires only after the lease is released
 
-            // Remaining spool IO happens after the lease is released, so a write window never waits on the disk.
-            ct.ThrowIfCancellationRequested();
-            job.SetScanned(scanned);
-            if (!Flush()) return;
-            hook.OnChunk(job.DbName, scanned);   // test seam: fires only after the lease is released
+            if (exhausted) return;                    // every tile done and drained: true end of the key range
+        }
+    }
 
-            if (exhausted) return;                     // the cursor ran out: true end of the key range
+    // Takes every free scan permit (at least one) before the lease. While none is free (a breakdown or another scan holds
+    // them all) it waits with a visible, cancellable note, so the process-wide ScanThreads cap is never exceeded.
+    private static int AcquirePermits(Job job, ScanLimiter limiter, CancellationToken ct)
+    {
+        bool noted = false;
+        try
+        {
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                int got = limiter.TryAcquireUpTo(limiter.Cap);
+                if (got > 0) return got;
+                if (!noted) { job.Note = WaitingForThreadNote; noted = true; }
+                ct.WaitHandle.WaitOne(100);
+            }
+        }
+        finally { if (noted && job.Note == WaitingForThreadNote) job.Note = null; }
+    }
+
+    // One worker: ONE iterator for its whole life, reseeked per tile (or per resume cursor). Matches, the raw cursor and the key
+    // count go to the ordered buffers together, once per stride; the worker never touches the spool or the filesystem.
+    private static void RunWorker(WordlistDatabase db, int? min, int? max, IReadOnlyList<WordlistDatabase.Tile> tiles,
+        OrderedTileBuffers buf, Func<string, bool> isMatch, CancellationToken token)
+    {
+        using var cur = db.OpenScan(min, max);
+        var local = new List<string>();
+        while (true)
+        {
+            int idx = buf.Claim(token, out var resume);
+            if (idx < 0) return;
+            var upper = tiles[idx].Upper;
+            if (resume is null) cur.SeekToLower(tiles[idx].Lower); else cur.SeekTo(resume);
+            local.Clear();
+            long keys = 0, chars = 0;
+            while (true)
+            {
+                bool done = !cur.MoveNext() || (upper is not null && cur.Key.SequenceCompareTo(upper) >= 0);
+                if (!done)
+                {
+                    var word = cur.Word;
+                    keys++;
+                    if (isMatch(word)) { local.Add(word); chars += word.Length; }
+                    if (keys < StrideKeys) continue;
+                }
+                var last = done ? null : cur.KeyCopy();   // exact resume point, taken while the iterator is still on it
+                StrideHook?.Invoke(buf.Scanned);
+                token.ThrowIfCancellationRequested();
+                buf.Commit(idx, local, chars, last, keys, done, token);
+                local.Clear();
+                keys = 0; chars = 0;
+                if (done) break;
+            }
         }
     }
 }

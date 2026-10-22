@@ -58,6 +58,18 @@ public sealed class ScanLimiter
         }
     }
 
+    /// <summary>Non-blocking <see cref="AcquireUpTo"/>: takes up to <paramref name="want"/> permits, 0 when none is free.</summary>
+    public int TryAcquireUpTo(int want)
+    {
+        want = Math.Clamp(want, 1, Cap);
+        lock (_gate)
+        {
+            int got = Math.Min(want, _free);
+            _free -= got;
+            return got;
+        }
+    }
+
     public void Release(int n)
     {
         if (n <= 0) return;
