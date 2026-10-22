@@ -43,7 +43,7 @@ public class MemoryCompactionSafetyTests
     {
         using var t = new TempDb();
         ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files * 2);   // margin: a background compaction can merge some L0 files
-        using var db = t.Open(new ScanLimiter(4));
+        using var db = new WordlistDatabase(t.Path, new UTF8Encoding(false), scanLimiter: new ScanLimiter(4), enableAutoCompaction: false);   // as production read opens: no background merge of L0 files
         Assert.True(db.NumFilesAtLevel0() > WordlistDatabase.ParallelMaxL0Files);
         int tiles = 0;
         db.TileHook = _ => Interlocked.Increment(ref tiles);
@@ -65,7 +65,7 @@ public class MemoryCompactionSafetyTests
         Assert.Equal(5, WordlistDatabase.ParseL0ForGate("5"));
         using var t = new TempDb();
         ImportRounds(t.Path, 3);
-        using var db = t.Open(new ScanLimiter(4));
+        using var db = new WordlistDatabase(t.Path, new UTF8Encoding(false), scanLimiter: new ScanLimiter(4), enableAutoCompaction: false);   // as production read opens: no background merge of L0 files
         db.L0PropertyHook = () => raw;
         int tiles = 0;
         db.TileHook = _ => Interlocked.Increment(ref tiles);
@@ -79,7 +79,7 @@ public class MemoryCompactionSafetyTests
     {
         using var t = new TempDb();
         ImportRounds(t.Path, WordlistDatabase.ParallelMaxL0Files * 2);   // margin: a background compaction can merge some L0 files
-        using var db = t.Open(new ScanLimiter(4));
+        using var db = new WordlistDatabase(t.Path, new UTF8Encoding(false), scanLimiter: new ScanLimiter(4), enableAutoCompaction: false);   // as production read opens: no background merge of L0 files
         db.Compact();
         Assert.True(db.NumFilesAtLevel0() <= WordlistDatabase.ParallelMaxL0Files);
         int tiles = 0;
