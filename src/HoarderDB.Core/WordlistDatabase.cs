@@ -213,44 +213,69 @@ public sealed partial class WordlistDatabase : IDisposable
         int chunkChars = _plan.ChunkChars;
         var queue = new BlockingCollection<string[]>(boundedCapacity: _plan.QueueCapacity);
 
+        // Fault signal: the first worker failure (disk full, I/O error) is kept and cancels the
+        // producer (blocked in queue.Add) and the other workers, so Import ends instead of hanging.
+        using var fault = new CancellationTokenSource();
+        Exception? workerFault = null;
+
         var tasks = new Task[workers];
         for (int w = 0; w < workers; w++)
-            tasks[w] = Task.Run(() => Worker(queue, min, max));
+            tasks[w] = Task.Run(() =>
+            {
+                try { Worker(queue, min, max, fault.Token); }
+                catch (OperationCanceledException) when (fault.IsCancellationRequested) { }   // another worker failed
+                catch (Exception e)
+                {
+                    Interlocked.CompareExchange(ref workerFault, e, null);
+                    fault.Cancel();
+                }
+            });
 
         long read = 0;
-        long sinceReport = 0;
-        var chunk = new string[chunkSize];
-        int ci = 0;
-        long chars = 0;
-        foreach (var raw in lines)
+        try
         {
-            read++;
-            if (++sinceReport >= reportEvery) { sinceReport = 0; onProgress?.Invoke(read); }
-            chunk[ci++] = raw;
-            chars += raw.Length;
-            // Flush by count OR size: lines can be thousands of chars, so a count-only chunk can reach hundreds of MB.
-            if (ci == chunkSize || chars >= chunkChars)
+            long sinceReport = 0;
+            var chunk = new string[chunkSize];
+            int ci = 0;
+            long chars = 0;
+            foreach (var raw in lines)
             {
-                if (ci == chunkSize) { queue.Add(chunk); chunk = new string[chunkSize]; }
-                else queue.Add(chunk[..ci]);   // size-capped: copy out, reuse the buffer
-                ci = 0;
-                chars = 0;
+                read++;
+                if (++sinceReport >= reportEvery) { sinceReport = 0; onProgress?.Invoke(read); }
+                chunk[ci++] = raw;
+                chars += raw.Length;
+                // Flush by count OR size: lines can be thousands of chars, so a count-only chunk can reach hundreds of MB.
+                if (ci == chunkSize || chars >= chunkChars)
+                {
+                    if (ci == chunkSize) { queue.Add(chunk, fault.Token); chunk = new string[chunkSize]; }
+                    else queue.Add(chunk[..ci], fault.Token);   // size-capped: copy out, reuse the buffer
+                    ci = 0;
+                    chars = 0;
+                }
             }
+            if (ci > 0) queue.Add(chunk[..ci], fault.Token);
         }
-        if (ci > 0) queue.Add(chunk[..ci]);
-        queue.CompleteAdding();
-        Task.WaitAll(tasks);
+        catch (OperationCanceledException) when (fault.IsCancellationRequested) { }   // a worker failed; rethrown below
+        finally
+        {
+            // Always release the workers and join them before Import returns or throws (the caller
+            // disposes the db and releases the write gate after this), including when `lines` throws.
+            queue.CompleteAdding();
+            Task.WaitAll(tasks);
+        }
+
+        if (workerFault != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(workerFault).Throw();
 
         // Make the import durable and queryable now that WAL was off.
         _db.Flush(new FlushOptions().SetWaitForFlush(true));
         return read;
     }
 
-    private void Worker(BlockingCollection<string[]> queue, int? min, int? max)
+    private void Worker(BlockingCollection<string[]> queue, int? min, int? max, CancellationToken stop)
     {
         var writeOpts = new WriteOptions().DisableWal(1);
         byte[] keyBuf = new byte[4 + 256];   // reused; grows for long words
-        foreach (var chunk in queue.GetConsumingEnumerable())
+        foreach (var chunk in queue.GetConsumingEnumerable(stop))
         {
             ReadOnlySpan<byte> marker = Marker;
             using var batch = new WriteBatch();
@@ -268,9 +293,13 @@ public sealed partial class WordlistDatabase : IDisposable
                 int n = _enc.GetBytes(word, keyBuf.AsSpan(4));
                 batch.Put(keyBuf.AsSpan(0, 4 + n), marker, null);
             }
+            WriteFaultHook?.Invoke();
             _db.Write(batch, writeOpts);
         }
     }
+
+    /// <summary>Test seam: called by an import worker just before each batch write (inject an I/O fault).</summary>
+    internal Action? WriteFaultHook;
 
     /// <summary>Exact-string membership test (single point lookup).</summary>
     public bool Contains(string word) => _db.Get(MakeKey(word)) != null;
