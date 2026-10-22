@@ -83,6 +83,16 @@ public class SearchTests
         throw new TimeoutException($"job {id} did not reach {string.Join('|', statuses)}");
     }
 
+    /// <summary>Forces a lease segment per stride (256 keys) and restores the knob on dispose.</summary>
+    private static IDisposable ShortSegments() => new ShortSegmentsScope(TimeSpan.Zero);
+
+    internal sealed class ShortSegmentsScope : IDisposable
+    {
+        private readonly TimeSpan _old = SearchRunner.MaxLeaseAge;
+        public ShortSegmentsScope(TimeSpan age) { SearchRunner.MaxLeaseAge = age; }
+        public void Dispose() => SearchRunner.MaxLeaseAge = _old;
+    }
+
     private static string SpoolFile(HoarderDbWebFactory f, string id) => Path.Combine(f.Root, ".search-tmp", id + ".matches");
 
     private static string[] PasswordWords => new[]
@@ -333,6 +343,7 @@ public class SearchTests
     public async Task Download_WhileRunning_Is409()
     {
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_dlrun"), PasswordWords);
         var c = await f.NewLoggedInClientAsync();
@@ -385,6 +396,7 @@ public class SearchTests
     public async Task Cancel_DeletesTheSpoolFile()
     {
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_cancel"), PasswordWords);
         var c = await f.NewLoggedInClientAsync();
@@ -485,6 +497,7 @@ public class SearchTests
     {
         var disk = new FakeDisk { Free = long.MaxValue };
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook) { ExtraServices = s => s.AddSingleton<IDiskSpace>(disk) };
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_disk"), Enumerable.Range(0, 12000).Select(i => "needle" + i.ToString("D5")));
         var c = await f.NewLoggedInClientAsync();
@@ -507,6 +520,7 @@ public class SearchTests
     public async Task SecondConcurrentSearch_Is409_ThenSucceedsAfterTheFirstFinishes()
     {
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_s1"), PasswordWords);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_s2"), PasswordWords);
@@ -534,6 +548,7 @@ public class SearchTests
     public async Task PausedSearch_ReleasesItsLeaseBetweenChunks_SameDbImportProceedsPromptly()
     {
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_conc"), PasswordWords);
         var c = await f.NewLoggedInClientAsync();
@@ -559,6 +574,7 @@ public class SearchTests
     public async Task PausedSearch_NeverBlocksAJobOnADifferentDatabase()
     {
         var hook = new BlockingSearchHook();
+        using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
         using var f = new HoarderDbWebFactory(1000, null, null, null, hook);
         HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_a"), PasswordWords);
         var c = await f.NewLoggedInClientAsync();
@@ -583,6 +599,7 @@ public class SearchTests
         try
         {
             var shook = new BlockingSearchHook();
+            using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
             var ihook = new BlockingHook();
             using var f = new HoarderDbWebFactory(1000, null, null, ihook, shook);
             var words = Enumerable.Range(0, 9000).Select(i => "needle" + i.ToString("D5")).ToArray();
@@ -623,6 +640,7 @@ public class SearchTests
         try
         {
             var shook = new BlockingSearchHook();
+            using var _seg = ShortSegments();   // many tiny lease segments so the hook sees a search that is still mid-scan
             var ihook = new BlockingHook();
             using var f = new HoarderDbWebFactory(1000, null, null, ihook, shook);
             HoarderDbWebFactory.Seed(Path.Combine(f.Root, "Test_busy2"), Enumerable.Range(0, 9000).Select(i => "needle" + i.ToString("D5")));

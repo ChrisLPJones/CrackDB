@@ -47,6 +47,24 @@ public sealed class DbLease : IDisposable
     private DbManager.DbEntry? _entry;
     public WordlistDatabase Db { get; }
 
+    /// <summary>
+    /// True when a write window (import/compact/delete) is queued for this db: it has claimed the handle and is
+    /// waiting for readers to drain. A long-lived reader (the search) polls this and yields its lease.
+    /// False once this lease is released.
+    /// </summary>
+    public bool WriterWaiting
+    {
+        get
+        {
+            var e = Volatile.Read(ref _entry);
+            if (e == null) return false;
+            lock (e.Gate) return e.Swapping;
+        }
+    }
+
+    /// <summary>True once shutdown has started (<c>CloseAll</c>): the holder must release the lease promptly.</summary>
+    public bool Closing => Volatile.Read(ref _entry) is { } e && e.Closing;
+
     internal DbLease(DbManager.DbEntry entry, WordlistDatabase db) { _entry = entry; Db = db; }
 
     public void Dispose()
@@ -76,6 +94,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         public int Readers;
         public bool Swapping;                          // a write window is claiming/releasing the handle; readers park briefly
         public bool Writing;                           // the write work is running; readers fail fast (409)
+        public volatile bool Closing;                  // shutdown started: long-lived readers must release promptly
         public bool Gone;                              // the db was deleted; this entry is orphaned (readers 404, writers re-fetch)
     }
 
@@ -285,6 +304,7 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
     private void CloseAll()
     {
         _closed = true;
+        foreach (var entry in _entries.Values) entry.Closing = true;   // before the wait: tells a persistent search lease to yield
         var deadline = DateTime.UtcNow.AddSeconds(10);   // let in-flight reads/streams finish first
         foreach (var entry in _entries.Values)
             lock (entry.Gate)
