@@ -237,7 +237,7 @@ public static class ApiEndpoints
             int? min = req.Min, max = req.Max;
             if (Validate(ref min, ref max, req.Length, req.Limit) is { } bad) return bad;
             var lease = dbs.AcquireRead(name);   // owned by the result; released after the stream ends
-            return new StreamingExportResult(lease, name, min, max, req.Limit, req.Filename);
+            return new StreamingExportResult(lease, name, min, max, req.Limit, req.Filename, dbs.ScanLimiter);
         });
     }
 
@@ -296,11 +296,12 @@ public static class ApiEndpoints
 /// thread fills a bounded queue of byte chunks; this handler only awaits the writes (see <see cref="ExportPipeline"/>).
 /// The lease outlives the whole stream and is released in finally.
 /// </summary>
-internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename) : IResult
+internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename, ScanLimiter? limiter = null) : IResult
 {
     public async Task ExecuteAsync(HttpContext ctx)
     {
         var ct = ctx.RequestAborted;
+        ExportPlan? plan = null;
         try
         {
             var range = (min, max) switch
@@ -316,9 +317,11 @@ internal sealed class StreamingExportResult(DbLease lease, string name, int? min
                 : ExportFileName.ContentDisposition(ExportFileName.Sanitise(filename));
 
             var log = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("HoarderDB.Web.Export");
-            await ExportPipeline.RunAsync(lease, ctx.Response.Body, min, max, limit, log, ctx.Abort, ct);
+            plan = limiter is null ? null : ExportPipeline.TryPlan(lease, limiter, min, max, limit, ct);
+            await ExportPipeline.RunAsync(lease, ctx.Response.Body, min, max, limit, log, ctx.Abort, ct, plan);
         }
-        // RunAsync has joined its reader thread (and disposed the cursor) on every path before this releases the lease.
-        finally { lease.Dispose(); }
+        // RunAsync has joined its reader/workers (and disposed every cursor) on every path before this releases the lease;
+        // the scan permits (if any) go back last.
+        finally { lease.Dispose(); plan?.Dispose(); }
     }
 }
