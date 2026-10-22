@@ -24,4 +24,24 @@ public static class SearchMatcher
         var cmp = s.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         return s.Contains ? w => w.Contains(q, cmp) : w => string.Equals(w, q, cmp);
     }
+
+    /// <summary>Matches the UTF-8 bytes of a stored word (the key without its 4-byte length prefix).</summary>
+    public delegate bool Utf8Match(ReadOnlySpan<byte> word);
+
+    /// <summary>
+    /// Byte-level matcher for the one mode where it is provably identical to <see cref="Compile"/>: case-sensitive
+    /// contains. UTF-8 is self-synchronising, so a valid query's bytes can only match at character boundaries of the stored
+    /// bytes, and a stored key with invalid bytes (decoded lossily to U+FFFD by the string path) can never match a query
+    /// that has no U+FFFD, in either path. Returns null (use the string matcher) for everything else: ignore-case (needs
+    /// string folding, no byte folding), exact (scanned only as ignore-case), and a query with a lone surrogate or
+    /// U+FFFD (the string path compares those as UTF-16 units, bytes would not).
+    /// </summary>
+    public static Utf8Match? CompileUtf8(SearchSpec s)
+    {
+        if (!s.Contains || s.IgnoreCase || s.Query.Length == 0 || s.Query.Contains('\uFFFD')) return null;
+        byte[] q;
+        try { q = new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetBytes(s.Query); }
+        catch (System.Text.EncoderFallbackException) { return null; }   // lone surrogate
+        return w => w.IndexOf(q) >= 0;
+    }
 }
