@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text;
 using RocksDbSharp;
 
 namespace HoarderDB;
@@ -32,12 +33,14 @@ public sealed partial class WordlistDatabase
         private bool _fresh;       // positioned by SeekTo, not yet consumed by MoveNext
         private bool _valid;
         private bool _disposed;
+        private readonly bool _plainUtf8;
 
         internal ScanCursor(WordlistDatabase owner, int? min, int? max)
         {
             _owner = owner;
             _lo = min ?? 0;
             _max = max;
+            _plainUtf8 = owner._enc is UTF8Encoding && owner._enc.GetPreamble().Length == 0;
             _ro = new ScanReadOptions(0, UpperBoundFor(max));
             try { _it = owner._db.NewIterator(readOptions: _ro.Options); }
             catch { _ro.Dispose(); throw; }
@@ -92,6 +95,16 @@ public sealed partial class WordlistDatabase
 
         /// <summary>The current raw key; valid only until the next MoveNext/SeekTo/Dispose.</summary>
         public ReadOnlySpan<byte> Key => _valid ? _it.GetKeySpan() : throw new InvalidOperationException("No current key.");
+
+        /// <summary>The current password's stored bytes (the key without its length prefix); valid only until the next MoveNext/SeekTo/Dispose.</summary>
+        public ReadOnlySpan<byte> PasswordBytes => Key.Slice(4);
+
+        /// <summary>
+        /// True when the database encoding is plain UTF-8 (no BOM). Then <see cref="PasswordBytes"/> that are valid UTF-8
+        /// can be copied to a UTF-8 output as they are; invalid bytes must still go through <see cref="Word"/>
+        /// (U+FFFD replacement) to match the string path.
+        /// </summary>
+        public bool IsPlainUtf8 => _plainUtf8;
 
         /// <summary>The current password.</summary>
         public string Word => _owner._enc.GetString(Key.Slice(4));

@@ -292,14 +292,12 @@ public static class ApiEndpoints
 }
 
 /// <summary>
-/// Streams Range() straight to the socket in length-then-password order. Bounded memory: output is
-/// buffered in ~512 KiB chunks and written asynchronously (Kestrel forbids sync body writes).
+/// Streams the export straight to the socket in length-then-password order (same bytes as Range()). A dedicated reader
+/// thread fills a bounded queue of byte chunks; this handler only awaits the writes (see <see cref="ExportPipeline"/>).
 /// The lease outlives the whole stream and is released in finally.
 /// </summary>
 internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename) : IResult
 {
-    private const int ChunkBytes = 512 * 1024;
-
     public async Task ExecuteAsync(HttpContext ctx)
     {
         var ct = ctx.RequestAborted;
@@ -317,24 +315,10 @@ internal sealed class StreamingExportResult(DbLease lease, string name, int? min
                 ? $"attachment; filename=\"{name}_{range}_{DateTime.UtcNow:yyyyMMddHHmmss}.txt\""
                 : ExportFileName.ContentDisposition(ExportFileName.Sanitise(filename));
 
-            using var buf = new MemoryStream(ChunkBytes + 64 * 1024);
-            await using var writer = new StreamWriter(buf, new UTF8Encoding(false), 64 * 1024, leaveOpen: true) { NewLine = "\n" };
-            var body = ctx.Response.Body;
-            foreach (var word in lease.Db.Range(min, max, limit))
-            {
-                writer.WriteLine(word);
-                if (buf.Length >= ChunkBytes)
-                {
-                    writer.Flush();
-                    ct.ThrowIfCancellationRequested();
-                    await body.WriteAsync(buf.GetBuffer().AsMemory(0, (int)buf.Length), ct);
-                    buf.SetLength(0);
-                }
-            }
-            writer.Flush();
-            if (buf.Length > 0) await body.WriteAsync(buf.GetBuffer().AsMemory(0, (int)buf.Length), ct);
+            var log = ctx.RequestServices.GetService<ILoggerFactory>()?.CreateLogger("HoarderDB.Web.Export");
+            await ExportPipeline.RunAsync(lease, ctx.Response.Body, min, max, limit, log, ctx.Abort, ct);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* client went away */ }
+        // RunAsync has joined its reader thread (and disposed the cursor) on every path before this releases the lease.
         finally { lease.Dispose(); }
     }
 }

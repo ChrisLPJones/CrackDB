@@ -34,6 +34,33 @@ public sealed class ScanCursorTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void PasswordBytes_AreTheStoredBytes_AndIsPlainUtf8_FollowsTheEncoding()
+    {
+        using var t = new TempDb();
+        using var db = t.Open();
+        db.Import(new[] { "ab", "caf\u00e9" }, null, null, threads: 2);
+        using var cur = db.OpenScan(null, null);
+        Assert.True(cur.IsPlainUtf8);
+        cur.SeekTo(null);
+        var got = new List<byte[]>();
+        while (cur.MoveNext()) got.Add(cur.PasswordBytes.ToArray());
+        Assert.Equal(new[] { Encoding.UTF8.GetBytes("ab"), Encoding.UTF8.GetBytes("caf\u00e9") }, got);
+    }
+
+    [Fact]
+    public void IsPlainUtf8_FalseForNonUtf8Encoding()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
+        try
+        {
+            using var db = new WordlistDatabase(path, Encoding.Latin1);
+            using var cur = db.OpenScan(null, null);
+            Assert.False(cur.IsPlainUtf8);
+        }
+        finally { try { Directory.Delete(path, true); } catch (IOException) { } }
+    }
+
+    [Fact]
     public void Cursor_ResumesExactlyFromRawKey_AcrossManyYields_NoKeyLostOrRepeated()
     {
         using var t = new TempDb();
