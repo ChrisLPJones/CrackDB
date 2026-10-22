@@ -20,6 +20,8 @@ public sealed class SearchSegmentTests : IDisposable
     private readonly TimeSpan _age = SearchRunner.MaxLeaseAge;
     private readonly TimeSpan _retry = SearchRunner.BusyRetry;
     private readonly Action<long>? _stride = SearchRunner.StrideHook;
+    private readonly int _bufM = SearchRunner.BufferMatches;
+    private readonly int _cap = SearchRunner.FlushBatchCap;
     private readonly string _root = Path.Combine(Path.GetTempPath(), "Test_" + Guid.NewGuid());
 
     public SearchSegmentTests()
@@ -34,6 +36,8 @@ public sealed class SearchSegmentTests : IDisposable
         SearchRunner.MaxLeaseAge = _age;
         SearchRunner.BusyRetry = _retry;
         SearchRunner.StrideHook = _stride;
+        SearchRunner.BufferMatches = _bufM;
+        SearchRunner.FlushBatchCap = _cap;
         try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
     }
 
@@ -89,7 +93,7 @@ public sealed class SearchSegmentTests : IDisposable
         return w.Distinct().ToArray();
     }
 
-    private Run Start(DbManager mgr, string db, SearchSpec spec, SearchSpool spool, JobRegistry reg, CountingHook? hook = null, FakeDisk? disk = null)
+    private Run Start(DbManager mgr, string db, SearchSpec spec, SearchSpool spool, JobRegistry reg, CountingHook? hook = null, FakeDisk? disk = null, bool slow = false)
     {
         Assert.True(SearchRunner.TryEnter(), "single search slot must be free");
         var (min, max) = SearchMatcher.EffectiveRange(spec);
@@ -99,7 +103,7 @@ public sealed class SearchSegmentTests : IDisposable
         reg.Add(job);
         hook ??= new CountingHook();
         var log = new CaptureLog();
-        var d = disk ?? new FakeDisk { Free = long.MaxValue };
+        IDiskSpace d = slow ? new SlowDisk() : disk ?? new FakeDisk { Free = long.MaxValue };
         var t = new Thread(() => SearchRunner.Execute(job, spec, mgr, d, spool.Dir, reg, log, job.Cts.Token, hook)) { IsBackground = true };
         t.Start();
         return new Run(job, t, hook, log);
@@ -238,6 +242,48 @@ public sealed class SearchSegmentTests : IDisposable
             Assert.Equal(expected, run.Matches());      // none lost, none repeated across the yield
             Assert.Equal(keys, run.Job.Snapshot().ScannedCount);
             Assert.True(run.Hook.Scanned.Count >= 2);
+        }
+        finally { await mgr.DisposeAsync(); }
+    }
+
+    // Slow spool volume: every free-space probe (one per drained batch) takes 40 ms.
+    private sealed class SlowDisk : IDiskSpace
+    {
+        public long RecheckIntervalBytes => 32L * 1024 * 1024;
+        public long? FreeBytes(string dir) { Thread.Sleep(40); return long.MaxValue; }
+    }
+
+    [Fact]
+    public async Task DenseQuery_SlowDisk_FlushCapped_WriterGetsInWhileBacklogPending_AndSpoolEqualsOracle()
+    {
+        var path = Seed("Test_flush", Big().Take(30_000));
+        var spec = new SearchSpec("needle", false, true);
+        var (expected, keys) = Oracle(path, spec);
+        var (mgr, spool, reg) = Host();
+        try
+        {
+            SearchRunner.BufferMatches = 8;      // tiny batches: every stride of dense hits needs many batches
+            SearchRunner.FlushBatchCap = 2;
+            var run = Start(mgr, "Test_flush", spec, spool, reg, disk: null, hook: null, slow: true);
+            while (run.Job.Snapshot().ScannedCount == 0 && !run.Job.IsTerminal) await Task.Delay(5);
+            var started = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var sw = Stopwatch.StartNew();
+            var write = mgr.WithWriteAsync("Test_flush", DbOpenMode.Read, (db, _) =>
+            {
+                started.TrySetResult(sw.Elapsed);
+                return Task.FromResult(true);
+            }, CancellationToken.None);
+            var waited = await started.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            // Uncapped, the drain loop never returned while the backlog was non-empty; capped it polls every ~2 batches (~80 ms).
+            Assert.True(waited < TimeSpan.FromSeconds(1.5), $"write window waited {waited.TotalMilliseconds:F0} ms");
+            Assert.False(run.Job.IsTerminal, "the drain backlog must still be pending when the write window starts");
+            await write;
+
+            run.Join();
+            Assert.Equal(JobStatus.Completed, run.Job.Status);
+            Assert.Equal(expected, run.Matches());
+            Assert.Equal(keys, run.Job.Snapshot().ScannedCount);
+            Assert.True(run.Hook.Scanned.Count >= 2, "the search must have yielded and resumed");
         }
         finally { await mgr.DisposeAsync(); }
     }

@@ -129,6 +129,11 @@ public static class SearchRunner
 
     private sealed class BusyTimeoutException : Exception;
 
+    private enum FlushResult { Done, More, LowDisk }
+
+    // Max spool batches per Flush call in the drainer loop (internal test knob; restore it).
+    internal static int FlushBatchCap { get; set; } = 2;
+
     private static void Scan(Job job, SearchSpec spec, IDbManager dbs, IDiskSpace disk, string spoolDir,
         CancellationToken ct, ISearchProgressHook hook, ILogger log)
     {
@@ -142,25 +147,28 @@ public static class SearchRunner
         DateTime? busySince = null;
         var batch = new List<string>();
 
-        // Drains the ordered prefix into the spool (this thread is the ONLY spool writer). False = low disk: the scan stops,
-        // keeping what is already written (the drained batch is dropped, so the spool is still an exact ordered prefix).
-        bool Flush()
+        // Drains the ordered prefix into the spool (this thread is the ONLY spool writer), at most `maxBatches` batches per call so
+        // the caller polls its yield conditions (writer waiting, lease age, closing, cancel) between calls even when the disk is slow
+        // and the query is dense. LowDisk: the scan stops, keeping what is already written (the drained batch is dropped, so the
+        // spool is still an exact ordered prefix). More: the cap was hit, the backlog may be non-empty.
+        FlushResult Flush(int maxBatches)
         {
-            while (true)
+            for (int n = 0; n < maxBatches; n++)
             {
                 batch.Clear();
-                if (buf!.Drain(batch) == 0) return true;
+                if (buf!.Drain(batch) == 0) return FlushResult.Done;
                 if (disk.FreeBytes(spoolDir) is { } free && free < SearchSpool.ReserveBytes)
                 {
                     // The DB shares this volume and compaction needs headroom: keep what we have and stop.
                     job.SetScanned(buf.Scanned);
                     job.SetMatched(spool.Count, capped: true);
                     job.Note = "Stopped: low disk space; " + spool.Count.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " matches kept.";
-                    return false;
+                    return FlushResult.LowDisk;
                 }
                 spool.Append(batch);
                 job.SetMatched(spool.Count, capped: false);
             }
+            return FlushResult.More;
         }
 
         while (true)
@@ -220,16 +228,19 @@ public static class SearchRunner
                         running.Signal();   // the initial count: workers hold the rest
 
                         long start = Stopwatch.GetTimestamp(), lastPoll = start, lastPublish = start;
+                        bool backlog = false;
                         while (true)
                         {
-                            buf.WaitActivity(20);
+                            if (!backlog) buf.WaitActivity(20);
                             if (ct.IsCancellationRequested || buf.Fault != null) break;
                             bool workersGone = running.CurrentCount == 0;
-                            if (!Flush()) { lowDisk = true; break; }
+                            var fr = Flush(FlushBatchCap);
+                            if (fr == FlushResult.LowDisk) { lowDisk = true; break; }
+                            backlog = fr == FlushResult.More;
                             long now = Stopwatch.GetTimestamp();
                             if (now - lastPublish >= PublishTicks) { lastPublish = now; job.SetScanned(buf.Scanned); }
-                            if (buf.AllDrained) { exhausted = true; break; }
-                            if (workersGone) break;
+                            if (!backlog && buf.AllDrained) { exhausted = true; break; }
+                            if (workersGone && !backlog) break;
                             bool yield = buf.Scanned > segStartKeys && Stopwatch.GetElapsedTime(start, now) >= MaxLeaseAge;
                             if (!yield && now - lastPoll >= PollTicks)
                             {
@@ -271,7 +282,14 @@ public static class SearchRunner
 
             if (fault is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(fault).Throw();
             ct.ThrowIfCancellationRequested();
-            if (!lowDisk && !Flush()) lowDisk = true;   // remaining spool IO happens after the lease is released, so a write window never waits on the disk
+            while (!lowDisk)   // final drain: empties everything (the cap only bounds the in-lease loop, where yields are polled)
+            {
+                var fr = Flush(FlushBatchCap);
+                if (fr == FlushResult.LowDisk) lowDisk = true;
+                else if (fr == FlushResult.Done) break;
+                else ct.ThrowIfCancellationRequested();
+            }
+            // remaining spool IO happens after the lease is released, so a write window never waits on the disk
             exhausted = exhausted || buf!.AllDrained;
 
             // Numbers only: never keys, matches or query text.
