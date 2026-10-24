@@ -48,6 +48,32 @@ public sealed class HardeningTests : IDisposable
     }
 
     [Fact]
+    public async Task CloseAll_AtDeadlineWithWriteJobRunning_SkipsDisposeAndWarns()
+    {
+        HoarderDbWebFactory.Seed(Path.Combine(_root, "Test_writing"), new[] { "alpha", "beta" });
+        var log = new CaptureLog<DbManager>();
+        var mgr = new DbManager(new DataRootResolver(_root), logger: log);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        WordlistDatabase? seen = null;
+        var job = mgr.WithWriteAsync<bool>("Test_writing", DbOpenMode.Read, async (db, _) =>
+        {
+            seen = db; started.SetResult(); await release.Task; return true;
+        }, CancellationToken.None);
+        await started.Task;
+        await Task.Run(() => mgr.StopAsync(CancellationToken.None));   // waits the deadline, must not dispose the write handle
+        Assert.True(seen!.Contains("alpha"));                           // still usable under the running job
+        lock (log.Lines)
+        {
+            Assert.Single(log.Lines);
+            Assert.Equal("Shutdown deadline reached with a write job still running; skipping close of one database handle.", log.Lines[0]);
+        }
+        release.SetResult();
+        await job;
+        await mgr.DisposeAsync();
+    }
+
+    [Fact]
     public void SearchSpool_TryPrepare_TightensAnExistingWideDirectory()
     {
         if (OperatingSystem.IsWindows()) return;

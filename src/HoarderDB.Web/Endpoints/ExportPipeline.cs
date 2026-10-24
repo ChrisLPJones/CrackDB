@@ -46,7 +46,7 @@ internal static class ExportPipeline
     internal static void Return(byte[] b)
     {
         Interlocked.Decrement(ref _inFlight);
-        ArrayPool<byte>.Shared.Return(b);
+        ArrayPool<byte>.Shared.Return(b, clearArray: true);   // chunks hold passwords: never leave them in the shared pool
     }
 
     /// <summary>
@@ -186,7 +186,7 @@ internal static class ExportPipeline
     internal static ExportPlan? TryPlan(DbLease lease, ScanLimiter limiter, int? min, int? max, long? limit, CancellationToken ct)
     {
         if (limit.HasValue || limiter.Cap < 2 || !lease.Db.ParallelScanAllowed) return null;
-        int got = limiter.TryAcquireUpTo(Math.Min(MaxWorkers, limiter.Cap - 1));
+        int got = limiter.TryAcquireUpToLeavingOne(Math.Min(MaxWorkers, limiter.Cap - 1));   // never the last FREE permit: a queued search/stat scan still runs
         if (got < 2) { limiter.Release(got); return null; }   // one worker adds nothing over D1 and could take the last free permit
         try
         {

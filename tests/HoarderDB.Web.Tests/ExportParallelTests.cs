@@ -325,6 +325,34 @@ public sealed class ExportParallelTests : IDisposable
         mgr.ScanLimiter.Release(2);
     }
 
+    [Fact]
+    public void Plan_LeavesOneFreePermit_AndNeverTakesTheLastFree()
+    {
+        MakeDb("Test_many", 10);
+        var mgr = Host(4);
+        using var lease = mgr.AcquireRead("Test_many");
+        Assert.Equal(1, mgr.ScanLimiter.TryAcquireUpTo(1));   // 3 free: a plan may take 2 and must leave 1
+        var plan = ExportPipeline.TryPlan(lease, mgr.ScanLimiter, null, null, null, default);
+        Assert.NotNull(plan);
+        Assert.Equal(1, mgr.ScanLimiter.Free);
+        plan!.Dispose();
+        Assert.Equal(3, mgr.ScanLimiter.Free);
+        Assert.Equal(1, mgr.ScanLimiter.TryAcquireUpTo(1));   // 2 free: fewer than three, so fall back to serial
+        Assert.Null(ExportPipeline.TryPlan(lease, mgr.ScanLimiter, null, null, null, default));
+        Assert.Equal(2, mgr.ScanLimiter.Free);
+        mgr.ScanLimiter.Release(2);
+    }
+
+    [Fact]
+    public void TryAcquireUpToLeavingOne_Counting()
+    {
+        var l = new ScanLimiter(4);
+        Assert.Equal(2, l.TryAcquireUpToLeavingOne(2)); Assert.Equal(2, l.Free);
+        Assert.Equal(1, l.TryAcquireUpToLeavingOne(2)); Assert.Equal(1, l.Free);
+        Assert.Equal(0, l.TryAcquireUpToLeavingOne(2)); Assert.Equal(1, l.Free);
+        l.Release(3); Assert.Equal(4, l.Free);
+    }
+
     private sealed class ListLogger(List<string> lines) : Microsoft.Extensions.Logging.ILogger
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
