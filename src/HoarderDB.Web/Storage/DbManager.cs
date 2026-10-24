@@ -313,7 +313,14 @@ public sealed class DbManager : IDbManager, IHostedService, IAsyncDisposable
         foreach (var entry in _entries.Values)
             lock (entry.Gate)
             {
-                while (entry.Readers > 0 && DateTime.UtcNow < deadline) Monitor.Wait(entry.Gate, 100);
+                while ((entry.Readers > 0 || entry.Writing) && DateTime.UtcNow < deadline) Monitor.Wait(entry.Gate, 100);
+                if (entry.Writing)
+                {
+                    // A compaction/import is still running past the deadline: disposing its handle would crash it.
+                    _logger?.LogWarning("Shutdown deadline reached with a write job still running; skipping close of one database handle.");
+                    Monitor.PulseAll(entry.Gate);
+                    continue;
+                }
                 if (entry.Readers > 0)
                 {
                     // Deadline passed with a reader still active: disposing under it would crash the reader.

@@ -259,6 +259,29 @@ public class ApiTests : IClassFixture<HoarderDbWebFactory>
     }
 
     [Fact]
+    public async Task Export_BeyondConcurrencyCap_Returns429FixedText_AndSlotsAreReleased()
+    {
+        var slots = _f.Services.GetRequiredService<HoarderDB.Web.Endpoints.ExportSlots>();
+        var c = _f.NewApiKeyClient();
+        for (int i = 0; i < HoarderDB.Web.Endpoints.ExportSlots.DefaultMax; i++) Assert.True(slots.TryEnter());
+        var r = await c.PostAsJsonAsync("/api/dbs/Test_words/export", new { min = 2, max = 7 });
+        Assert.Equal(HttpStatusCode.TooManyRequests, r.StatusCode);
+        Assert.Contains("Too many exports are running. Try again shortly.", await r.Content.ReadAsStringAsync());
+        Assert.Equal(HoarderDB.Web.Endpoints.ExportSlots.DefaultMax, slots.Active);   // a rejected request did not leak a slot
+        slots.Exit();
+        var ok = await c.PostAsJsonAsync("/api/dbs/Test_words/export", new { min = 2, max = 7 });
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        await ok.Content.ReadAsStringAsync();
+        slots.Exit(); slots.Exit();
+        Assert.Equal(0, slots.Active);                                                // released after the stream ends
+        var bad = await c.PostAsJsonAsync("/api/dbs/Test_words/export", new { min = 9, max = 2 });   // 400 path takes no slot
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+        Assert.Equal(0, slots.Active);
+        var missing = await c.PostAsJsonAsync("/api/dbs/Test_nosuch/export", new { });               // lease failure releases the slot
+        Assert.Equal(0, slots.Active);
+    }
+
+    [Fact]
     public async Task Export_FormPost_WithCookie_LengthLimitAndAll()
     {
         var c = await _f.NewLoggedInClientAsync();

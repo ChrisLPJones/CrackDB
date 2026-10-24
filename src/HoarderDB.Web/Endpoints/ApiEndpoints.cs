@@ -230,14 +230,19 @@ public static class ApiEndpoints
             return Results.Ok(new { written = r.Written, skipped = r.Skipped, total = r.Total });
         });
 
-        api.MapPost("/dbs/{name}/export", async (string name, HttpContext ctx, IDbManager dbs) =>
+        api.MapPost("/dbs/{name}/export", async (string name, HttpContext ctx, IDbManager dbs, ExportSlots slots) =>
         {
             var (req, error) = await ReadExportRequest(ctx);
             if (error != null) return error;
             int? min = req.Min, max = req.Max;
             if (Validate(ref min, ref max, req.Length, req.Limit) is { } bad) return bad;
-            var lease = dbs.AcquireRead(name);   // owned by the result; released after the stream ends
-            return new StreamingExportResult(lease, name, min, max, req.Limit, req.Filename, dbs.ScanLimiter);
+            if (!slots.TryEnter()) return Problem(429, "Too many exports are running. Try again shortly.");
+            try
+            {
+                var lease = dbs.AcquireRead(name);   // owned by the result; released after the stream ends
+                return new StreamingExportResult(lease, name, min, max, req.Limit, req.Filename, dbs.ScanLimiter, slots.Exit);
+            }
+            catch { slots.Exit(); throw; }
         });
     }
 
@@ -296,7 +301,7 @@ public static class ApiEndpoints
 /// thread fills a bounded queue of byte chunks; this handler only awaits the writes (see <see cref="ExportPipeline"/>).
 /// The lease outlives the whole stream and is released in finally.
 /// </summary>
-internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename, ScanLimiter? limiter = null) : IResult
+internal sealed class StreamingExportResult(DbLease lease, string name, int? min, int? max, long? limit, string? filename, ScanLimiter? limiter = null, Action? onDone = null) : IResult
 {
     public async Task ExecuteAsync(HttpContext ctx)
     {
@@ -323,6 +328,21 @@ internal sealed class StreamingExportResult(DbLease lease, string name, int? min
         }
         // RunAsync has joined its reader/workers (and disposed every cursor) on every path before this releases the lease;
         // the scan permits (if any) go back last.
-        finally { lease.Dispose(); plan?.Dispose(); }
+        finally { lease.Dispose(); plan?.Dispose(); onDone?.Invoke(); }
     }
+}
+
+/// <summary>Process-wide cap on simultaneous exports (each holds a lease and dedicated reader threads). Operator-fixed, not client input.</summary>
+public sealed class ExportSlots(int max = ExportSlots.DefaultMax)
+{
+    public const int DefaultMax = 3;
+    private int _active;
+    internal int Active => Volatile.Read(ref _active);
+    internal bool TryEnter()
+    {
+        if (Interlocked.Increment(ref _active) <= max) return true;
+        Interlocked.Decrement(ref _active);
+        return false;
+    }
+    internal void Exit() => Interlocked.Decrement(ref _active);
 }

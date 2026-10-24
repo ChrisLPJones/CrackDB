@@ -82,6 +82,20 @@ public sealed class ScanLimiter
         }
     }
 
+    /// <summary>
+    /// Non-blocking: takes up to <paramref name="want"/> permits but always leaves at least one free for others
+    /// (so a heavy long-running holder can never starve a queued scan). Returns 0 when fewer than two are free.
+    /// </summary>
+    public int TryAcquireUpToLeavingOne(int want)
+    {
+        lock (_gate)
+        {
+            int got = Math.Clamp(Math.Min(want, _free - 1), 0, Cap);
+            _free -= got;
+            return got;
+        }
+    }
+
     public void Release(int n)
     {
         if (n <= 0) return;
